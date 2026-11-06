@@ -45,12 +45,16 @@ data class TransitionEntity(
     @Query("SELECT * FROM flows WHERE id = :flowId LIMIT 1") suspend fun flow(flowId: String): FlowEntity?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsert(flow: FlowEntity)
     @Query("SELECT * FROM screens WHERE flowId = :flowId ORDER BY position") fun observeScreens(flowId: String): Flow<List<ScreenEntity>>
+    @Query("SELECT * FROM screens WHERE flowId = :flowId ORDER BY position") suspend fun screensForFlow(flowId: String): List<ScreenEntity>
     @Insert suspend fun insertScreen(screen: ScreenEntity)
     @Query("SELECT COUNT(*) FROM screens WHERE flowId = :flowId") suspend fun screenCount(flowId: String): Int
     @Query("SELECT * FROM screens WHERE flowId = :flowId ORDER BY position DESC LIMIT 1") suspend fun lastScreen(flowId: String): ScreenEntity?
     @Query("DELETE FROM screens WHERE id = :screenId") suspend fun deleteScreen(screenId: String)
     @Insert suspend fun insertTransition(transition: TransitionEntity)
     @Query("SELECT * FROM transitions WHERE flowId = :flowId ORDER BY createdAt") fun observeTransitions(flowId: String): Flow<List<TransitionEntity>>
+    @Query("DELETE FROM transitions WHERE flowId = :flowId") suspend fun deleteTransitionsForFlow(flowId: String)
+    @Query("DELETE FROM screens WHERE flowId = :flowId") suspend fun deleteScreensForFlow(flowId: String)
+    @Query("DELETE FROM flows WHERE id = :flowId") suspend fun deleteFlow(flowId: String)
 }
 
 @Database(entities = [FlowEntity::class, ScreenEntity::class, TransitionEntity::class], version = 4, exportSchema = false)

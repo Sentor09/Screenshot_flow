@@ -3,7 +3,9 @@ package com.flowsnap
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.graphics.pdf.PdfDocument
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Bundle
 import android.os.Build
 import android.media.projection.MediaProjectionConfig
@@ -14,6 +16,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Canvas
@@ -66,6 +69,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Typography
 import androidx.compose.material3.Checkbox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -82,9 +86,16 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.draw.drawBehind
@@ -101,6 +112,7 @@ import com.flowsnap.capture.CaptureService
 import com.flowsnap.data.FlowDatabase
 import com.flowsnap.data.FlowEntity
 import com.flowsnap.data.ScreenEntity
+import com.flowsnap.data.ScreenshotStorage
 import com.flowsnap.data.TransitionEntity
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
@@ -109,9 +121,35 @@ import java.util.UUID
 
 data class CaptureReview(val flowId: String, val path: String, val markerX: Float, val markerY: Float)
 
+private val Urbanist = FontFamily(
+    Font(R.font.urbanist_regular, FontWeight.Normal),
+    Font(R.font.urbanist_medium, FontWeight.Medium),
+    Font(R.font.urbanist_bold, FontWeight.Bold)
+)
+
+private val FlowSnapTypography = Typography().let { base ->
+    Typography(
+        displayLarge = base.displayLarge.copy(fontFamily = Urbanist),
+        displayMedium = base.displayMedium.copy(fontFamily = Urbanist),
+        displaySmall = base.displaySmall.copy(fontFamily = Urbanist),
+        headlineLarge = base.headlineLarge.copy(fontFamily = Urbanist),
+        headlineMedium = base.headlineMedium.copy(fontFamily = Urbanist),
+        headlineSmall = base.headlineSmall.copy(fontFamily = Urbanist),
+        titleLarge = base.titleLarge.copy(fontFamily = Urbanist),
+        titleMedium = base.titleMedium.copy(fontFamily = Urbanist),
+        titleSmall = base.titleSmall.copy(fontFamily = Urbanist),
+        bodyLarge = base.bodyLarge.copy(fontFamily = Urbanist),
+        bodyMedium = base.bodyMedium.copy(fontFamily = Urbanist),
+        bodySmall = base.bodySmall.copy(fontFamily = Urbanist),
+        labelLarge = base.labelLarge.copy(fontFamily = Urbanist),
+        labelMedium = base.labelMedium.copy(fontFamily = Urbanist),
+        labelSmall = base.labelSmall.copy(fontFamily = Urbanist)
+    )
+}
+
 class MainActivity : ComponentActivity() {
     private var review by mutableStateOf<CaptureReview?>(null)
-    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); enableEdgeToEdge(); WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = true; acceptReviewIntent(intent); setContent { MaterialTheme { FlowSnapApp(review = review, dismissReview = { review = null }) } } }
+    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); enableEdgeToEdge(); WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = true; acceptReviewIntent(intent); setContent { MaterialTheme(typography = FlowSnapTypography) { FlowSnapApp(review = review, dismissReview = { review = null }) } } }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); acceptReviewIntent(intent) }
     private fun acceptReviewIntent(intent: Intent) { val path = intent.getStringExtra(CaptureService.EXTRA_PATH) ?: return; review = CaptureReview(intent.getStringExtra(CaptureService.EXTRA_FLOW_ID).orEmpty(), path, intent.getFloatExtra(CaptureService.EXTRA_MARKER_X, .5f), intent.getFloatExtra(CaptureService.EXTRA_MARKER_Y, .5f)) }
 }
@@ -135,6 +173,15 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
         persistCapture(review)
         onSaved(dao.flow(review.flowId))
     }
+    fun deleteFlow(flow: FlowEntity, onDeleted: () -> Unit) = viewModelScope.launch {
+        // Delete the locally stored screenshot files before removing their Room records.
+        dao.screensForFlow(flow.id).forEach { screen -> runCatching { java.io.File(screen.imagePath).delete() } }
+        dao.deleteTransitionsForFlow(flow.id)
+        dao.deleteScreensForFlow(flow.id)
+        dao.deleteFlow(flow.id)
+        ScreenshotStorage.deleteFlowFolder(getApplication(), flow.id)
+        onDeleted()
+    }
     fun screens(flowId: String) = dao.observeScreens(flowId)
     fun transitions(flowId: String) = dao.observeTransitions(flowId)
 }
@@ -152,7 +199,8 @@ private sealed interface Screen { data object Home : Screen; data class Diagram(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun HomeScreen(vm: FlowViewModel, openFlow: (FlowEntity) -> Unit) {
     val flows by vm.flows.collectAsStateWithLifecycle()
-    Column(Modifier.fillMaxSize().background(Color(0xFFF5F5F5)).windowInsetsPadding(WindowInsets.statusBars)) {
+    // Keep gallery cards above the Android gesture/three-button navigation area.
+    Column(Modifier.fillMaxSize().background(Color(0xFFF5F5F5)).windowInsetsPadding(WindowInsets.systemBars)) {
         Row(Modifier.fillMaxWidth().height(64.dp).background(Color.White).padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Default.Menu, "Menu", Modifier.size(28.dp), tint = Color(0xFF656565))
             Spacer(Modifier.width(20.dp))
@@ -181,39 +229,56 @@ private sealed interface Screen { data object Home : Screen; data class Diagram(
 
 @Composable private fun CreateFlowTile(modifier: Modifier, onClick: () -> Unit) = Card(onClick = onClick, modifier = modifier, elevation = CardDefaults.cardElevation(defaultElevation = 6.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF344B93))) { Box(Modifier.fillMaxSize().padding(18.dp)) { Text("+", Modifier.align(Alignment.Center), color = Color.White, style = MaterialTheme.typography.displayLarge.copy(fontSize = 94.sp), fontWeight = FontWeight.Light); Text("Create new diagram", Modifier.align(Alignment.BottomStart), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false) } }
 
-@Composable private fun SampleFlowTile(title: String, accent: Color) = Card(modifier = Modifier.height(244.dp).fillMaxWidth()) { Column(Modifier.padding(12.dp).fillMaxSize()) { FlowPreview(accent, Modifier.weight(1f).fillMaxWidth()); Text(title, color = Color(0xFF263F7D), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium) } }
-
 @Composable private fun FlowTile(flow: FlowEntity, vm: FlowViewModel, onClick: () -> Unit) {
     val screens by vm.screens(flow.id).collectAsStateWithLifecycle(initialValue = emptyList())
     val transitions by vm.transitions(flow.id).collectAsStateWithLifecycle(initialValue = emptyList())
     val bitmaps = remember(screens.map { it.imagePath }) {
         screens.associate { screen -> screen.id to android.graphics.BitmapFactory.decodeFile(screen.imagePath).asImageBitmap() }
     }
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth().aspectRatio(.72f)) {
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().aspectRatio(.72f),
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, Color(0xFFE0E0E0)),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+    ) {
         Column(Modifier.padding(10.dp).fillMaxSize()) {
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                if (screens.isEmpty()) {
-                    FlowPreview(Color(0xFF24519B), Modifier.fillMaxSize())
-                } else {
+            Column(
+                Modifier.weight(1f).fillMaxWidth()
+                    .background(Color.White)
+                    .border(1.dp, Color(0xFFF0F0F0), RoundedCornerShape(1.dp))
+                    .padding(4.dp)
+            ) {
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                if (screens.isNotEmpty()) {
                     FlowDiagramCanvas(screens, transitions, bitmaps, Modifier.fillMaxSize())
                 }
+                }
+                Row(
+                    Modifier.fillMaxWidth().height(15.dp)
+                        .border(1.dp, Color(0xFFE6E6E6), RoundedCornerShape(0.dp))
+                        .padding(horizontal = 3.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(flow.name, fontSize = 5.sp, color = Color(0xFF555555), maxLines = 1)
+                    Text("v1.0", fontSize = 5.sp, color = Color(0xFF555555))
+                    Text("You", fontSize = 5.sp, color = Color(0xFF555555))
+                }
             }
-            Spacer(Modifier.height(8.dp))
-            Text(flow.name, color = Color(0xFF263F7D), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium, maxLines = 2)
-            Text("${screens.size} screen${if (screens.size == 1) "" else "s"}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(9.dp))
+            Text(
+                flow.name,
+                modifier = Modifier.fillMaxWidth(),
+                color = Color(0xFF314A87),
+                fontSize = 17.sp,
+                lineHeight = 20.sp,
+                fontWeight = FontWeight.Medium,
+                textAlign = TextAlign.Center,
+                maxLines = 2
+            )
         }
-    }
-}
-
-@Composable private fun FlowPreview(accent: Color, modifier: Modifier = Modifier) = Canvas(modifier) {
-    val screenW = size.width / 4.8f; val screenH = size.height / 2.1f
-    val positions = listOf(0.06f to 0.15f, 0.57f to 0.10f, 0.30f to 0.56f)
-    positions.forEachIndexed { index, (x, y) ->
-        val left = x * size.width; val top = y * size.height
-        drawRoundRect(Color.White, topLeft = androidx.compose.ui.geometry.Offset(left, top), size = androidx.compose.ui.geometry.Size(screenW, screenH), cornerRadius = androidx.compose.ui.geometry.CornerRadius(8f, 8f))
-        drawRoundRect(accent.copy(alpha = .55f), topLeft = androidx.compose.ui.geometry.Offset(left, top), size = androidx.compose.ui.geometry.Size(screenW, screenH), cornerRadius = androidx.compose.ui.geometry.CornerRadius(8f, 8f), style = Stroke(3f))
-        drawRect(accent.copy(alpha = .75f), topLeft = androidx.compose.ui.geometry.Offset(left + 8f, top + 14f), size = androidx.compose.ui.geometry.Size(screenW - 16f, 6f))
-        if (index < 2) drawLine(accent.copy(alpha = .65f), androidx.compose.ui.geometry.Offset(left + screenW, top + screenH / 2), androidx.compose.ui.geometry.Offset(left + screenW + 20f, top + screenH / 2), strokeWidth = 3f)
     }
 }
 
@@ -268,6 +333,11 @@ private sealed interface Screen { data object Home : Screen; data class Diagram(
     var pendingResult by remember { mutableStateOf<androidx.activity.result.ActivityResult?>(null) }
     var showTips by remember { mutableStateOf(false) }
     var captureLaunchInProgress by remember { mutableStateOf(false) }
+    var showDeleteConfirmation by remember { mutableStateOf(false) }
+    var showExpandedPreview by remember { mutableStateOf(false) }
+    val exportPdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
+        uri?.let { exportFlowPdf(context, it, screens, transitions, flow) }
+    }
     val captureConsent = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         captureLaunchInProgress = false
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
@@ -300,20 +370,100 @@ private sealed interface Screen { data object Home : Screen; data class Diagram(
     val hasScreens = screens.isNotEmpty()
     // The bottom controls must stay inside the safe area on both gesture and
     // three-button navigation devices.
-    Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).diagramGrid()) {
+    BoxWithConstraints(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).diagramGrid()) {
+        // The document lives only in this protected middle area. This prevents
+        // it from ever sitting below the Home/Settings controls or beneath the
+        // image-add / capture / bottom action controls.
+        // Keep a deliberately generous exclusion zone around the fixed editor
+        // controls. The document is content, not a layer over the controls.
+        // In particular, 220dp reserves room for the Add Image button above
+        // the large capture button and the three actions at the lower left.
+        val topControlsClearance = 112.dp
+        val bottomControlsClearance = 220.dp
+        val safeDiagramHeight = (maxHeight - topControlsClearance - bottomControlsClearance).coerceAtLeast(0.dp)
+        // 600 is expressed as physical pixels so this page looks like the
+        // reference on phones of different densities. It is also capped by
+        // the safe middle area and width of the actual device.
+        val requestedPageSide = with(LocalDensity.current) { 600.toDp() }
+        val pageSide = minOf(requestedPageSide, maxWidth * .88f, safeDiagramHeight)
+        val pageTopPadding = topControlsClearance + ((safeDiagramHeight - pageSide) / 2)
         EditorCircle(Icons.Default.Home, "Home", goBack, modifier = Modifier.align(Alignment.TopStart).padding(20.dp))
         EditorCircle(Icons.Default.Settings, "Settings", onClick = { }, enabled = hasScreens, modifier = Modifier.align(Alignment.TopCenter).padding(top = 20.dp))
         if (screens.isEmpty()) Text("Create a diagram with the + option below", Modifier.align(Alignment.Center), color = Color(0xFF24519B), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        else DiagramPreview(screens, transitions, flow, Modifier.align(Alignment.Center).fillMaxWidth(.88f))
+        else DiagramPreview(
+            screens,
+            transitions,
+            flow,
+            // Fixed document page: same size for every diagram, independent of
+            // screenshot count, and constrained to the protected middle area.
+            Modifier.align(Alignment.TopCenter).padding(top = pageTopPadding)
+                // This is a strict, square 600px page (or the safe maximum on
+                // a smaller screen). Its size is independent of node count.
+                .size(pageSide)
+                .clipToBounds(),
+            onOpenPreview = { showExpandedPreview = true }
+        )
         Row(Modifier.align(Alignment.BottomStart).padding(22.dp), horizontalArrangement = Arrangement.spacedBy(26.dp)) {
             EditorCircle(Icons.Default.Save, "Save", onClick = { }, enabled = hasScreens)
-            EditorCircle(Icons.Default.CloudUpload, "Export", onClick = { }, enabled = hasScreens)
-            EditorCircle(Icons.Default.Delete, "Delete", onClick = { }, enabled = hasScreens)
+            EditorCircle(Icons.Default.CloudUpload, "Export PDF", onClick = { exportPdf.launch("${flow.name}.pdf") }, enabled = hasScreens)
+            EditorCircle(Icons.Default.Delete, "Delete diagram", onClick = { showDeleteConfirmation = true })
         }
         Column(Modifier.align(Alignment.BottomEnd).padding(22.dp), verticalArrangement = Arrangement.spacedBy(18.dp), horizontalAlignment = Alignment.End) {
             EditorCircle(Icons.Default.AddPhotoAlternate, "Add image", onClick = { })
             EditorCircle(Icons.Default.Add, "Capture", beginCapture, large = true, enabled = !captureLaunchInProgress)
         }
+    }
+    if (showExpandedPreview) {
+        Dialog(
+            onDismissRequest = { showExpandedPreview = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(Modifier.fillMaxSize().background(Color(0xCC000000)), contentAlignment = Alignment.Center) {
+                DiagramPreview(
+                    screens = screens,
+                    transitions = transitions,
+                    flow = flow,
+                    modifier = Modifier.fillMaxWidth(.94f).height(520.dp),
+                    onOpenPreview = null
+                )
+                TextButton(
+                    onClick = { showExpandedPreview = false },
+                    modifier = Modifier.align(Alignment.TopEnd).padding(20.dp)
+                ) { Text("CLOSE", color = Color.White) }
+            }
+        }
+    }
+    if (showDeleteConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirmation = false },
+            containerColor = Color.White,
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("⚠", color = Color(0xFFE8D372), fontSize = 32.sp)
+                    Spacer(Modifier.width(12.dp))
+                    Text("Deleting diagram", color = Color(0xFF263F7D), fontWeight = FontWeight.Medium)
+                }
+            },
+            text = {
+                Text(
+                    "Your diagram will be permanently deleted. Are you sure you want to do this?",
+                    color = Color(0xFF222222), fontSize = 17.sp
+                )
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirmation = false }) {
+                    Text("CANCEL", color = Color(0xFF263F7D))
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.deleteFlow(flow) {
+                        showDeleteConfirmation = false
+                        goBack()
+                    }
+                }) { Text("OK", color = Color(0xFF263F7D)) }
+            }
+        )
     }
     if (showTips) CaptureTipDialog(onConfirm = { dontShowAgain -> if (dontShowAgain) tipPreferences.edit().putBoolean("hide_capture_tip", true).apply(); val result = pendingResult!!; ContextCompat.startForegroundService(context, Intent(context, CaptureService::class.java).putExtra(CaptureService.EXTRA_FLOW_ID, flow.id).putExtra(CaptureService.EXTRA_RESULT_CODE, result.resultCode).putExtra(CaptureService.EXTRA_RESULT_DATA, result.data)); showTips = false })
 }
@@ -341,36 +491,141 @@ private fun Modifier.diagramGrid() = this.drawBehind {
     var y = 0f; while (y <= size.height) { drawLine(Color.White, androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width, y), 3f); y += spacing }
 }
 
+/** Writes the same paged 7 x 4 flow arrangement to a user-selected PDF file. */
+private fun exportFlowPdf(
+    context: Context,
+    destination: Uri,
+    screens: List<ScreenEntity>,
+    transitions: List<TransitionEntity>,
+    flow: FlowEntity
+) {
+    runCatching {
+        // PdfDocument is not a java.io.Closeable on every Android API stub,
+        // so close it explicitly instead of Kotlin's use { } helper.
+        val document = PdfDocument()
+        try {
+            screens.chunked(28).forEachIndexed { pageNumber, pageScreens ->
+                val page = document.startPage(PdfDocument.PageInfo.Builder(1200, 1200, pageNumber + 1).create())
+                val canvas = page.canvas
+                val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                canvas.drawColor(android.graphics.Color.WHITE)
+                val columns = minOf(7, pageScreens.size)
+                val rows = (pageScreens.size + columns - 1) / columns
+                val margin = 48f
+                val footerHeight = 92f
+                val gap = 18f
+                val availableHeight = 1200f - margin * 2 - footerHeight - gap * (rows - 1)
+                val nodeWidth = minOf(
+                    (1200f - margin * 2 - gap * (columns - 1)) / columns,
+                    availableHeight / (rows * 2.15f)
+                )
+                val nodeHeight = nodeWidth * 2.15f
+                val positions = pageScreens.mapIndexed { index, _ ->
+                    val row = index / columns
+                    val column = index % columns
+                    android.graphics.RectF(
+                        margin + column * (nodeWidth + gap),
+                        margin + row * (nodeHeight + gap),
+                        margin + column * (nodeWidth + gap) + nodeWidth,
+                        margin + row * (nodeHeight + gap) + nodeHeight
+                    )
+                }
+                val indexes = pageScreens.withIndex().associate { it.value.id to it.index }
+                paint.color = android.graphics.Color.rgb(80, 80, 80)
+                paint.strokeWidth = 4f
+                transitions.filter { it.fromScreenId in indexes && it.toScreenId in indexes }.forEach { edge ->
+                    val from = positions[indexes.getValue(edge.fromScreenId)]
+                    val to = positions[indexes.getValue(edge.toScreenId)]
+                    val startX = from.left + from.width() * edge.fromMarkerX
+                    val startY = from.top + from.height() * edge.fromMarkerY
+                    canvas.drawLine(startX, startY, to.centerX(), to.centerY(), paint)
+                }
+                pageScreens.forEachIndexed { index, screen ->
+                    android.graphics.BitmapFactory.decodeFile(screen.imagePath)?.let { bitmap ->
+                        val target = positions[index]
+                        val scale = minOf(target.width() / bitmap.width, target.height() / bitmap.height)
+                        val width = bitmap.width * scale
+                        val height = bitmap.height * scale
+                        val imageRect = android.graphics.RectF(target.centerX() - width / 2, target.centerY() - height / 2, target.centerX() + width / 2, target.centerY() + height / 2)
+                        canvas.drawBitmap(bitmap, null, imageRect, paint)
+                        bitmap.recycle()
+                    }
+                }
+                paint.color = android.graphics.Color.rgb(245, 245, 245)
+                canvas.drawRect(36f, 1100f, 1164f, 1164f, paint)
+                paint.color = android.graphics.Color.DKGRAY
+                paint.textSize = 22f
+                canvas.drawText(flow.name, 54f, 1140f, paint)
+                canvas.drawText("v1.0", 720f, 1140f, paint)
+                canvas.drawText("Page ${pageNumber + 1}", 960f, 1140f, paint)
+                document.finishPage(page)
+            }
+            val output = context.contentResolver.openOutputStream(destination)
+                ?: error("Unable to open the selected PDF destination")
+            output.use { stream -> document.writeTo(stream) }
+        } finally {
+            document.close()
+        }
+    }.onSuccess {
+        android.widget.Toast.makeText(context, "PDF saved", android.widget.Toast.LENGTH_SHORT).show()
+    }.onFailure {
+        android.widget.Toast.makeText(context, "Could not save PDF", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
 @Composable private fun EditorCircle(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit, large: Boolean = false, enabled: Boolean = true, modifier: Modifier = Modifier) {
     val size = if (large) 74.dp else 48.dp
     val tint = if (enabled) Color(0xFF24519B) else Color(0xFFB8B8B8)
     Surface(modifier = modifier.size(size), shape = CircleShape, color = Color.Transparent, border = BorderStroke(if (large) 3.dp else 2.dp, tint)) { Box(Modifier.fillMaxSize().clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) { Icon(icon, label, tint = tint, modifier = Modifier.size(if (large) 42.dp else 27.dp)) } }
 }
 
-@Composable private fun DiagramPreview(screens: List<ScreenEntity>, transitions: List<TransitionEntity>, flow: FlowEntity, modifier: Modifier = Modifier) {
+@Composable private fun DiagramPreview(
+    screens: List<ScreenEntity>,
+    transitions: List<TransitionEntity>,
+    flow: FlowEntity,
+    modifier: Modifier = Modifier,
+    onOpenPreview: (() -> Unit)? = null
+) {
     val bitmaps = remember(screens.map { it.imagePath }) {
         screens.associate { screen -> screen.id to android.graphics.BitmapFactory.decodeFile(screen.imagePath).asImageBitmap() }
     }
-    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)) {
-        Column(Modifier.padding(12.dp)) {
-            BoxWithConstraints(Modifier.fillMaxWidth()) {
-                val columns = minOf(4, screens.size)
-                val rows = (screens.size + columns - 1) / columns
-                val horizontalPadding = 20.dp
-                val horizontalGap = 8.dp
-                val nodeWidth = (maxWidth - horizontalPadding - horizontalGap * (columns - 1)) / columns
-                // Phone screenshots are portrait. Reserve a correctly shaped
-                // slot instead of forcing them into a short, squashed box.
-                val nodeHeight = nodeWidth * 2.15f
-                val canvasHeight = nodeHeight * rows + 16.dp + 12.dp * (rows - 1)
-                FlowDiagramCanvas(
-                    screens = screens,
-                    transitions = transitions,
-                    bitmaps = bitmaps,
-                    modifier = Modifier.fillMaxWidth().height(canvasHeight)
-                )
+    // A document page holds at most seven columns by four rows: 28 screens.
+    // Further screens are shown on another fixed-size page via the toggler.
+    val pages = remember(screens.map { it.id }) { screens.chunked(28) }
+    var selectedPage by remember(screens.map { it.id }) { mutableStateOf(0) }
+    val pageIndex = selectedPage.coerceIn(0, pages.lastIndex)
+    val pageScreens = pages[pageIndex]
+    val pageIds = pageScreens.mapTo(mutableSetOf()) { it.id }
+    val pageTransitions = transitions.filter {
+        it.fromScreenId in pageIds && it.toScreenId in pageIds
+    }
+    val cardModifier = if (onOpenPreview == null) modifier else modifier.clickable { onOpenPreview() }
+    Card(
+        modifier = cardModifier.clipToBounds(),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+    ) {
+        Column(Modifier.padding(12.dp).fillMaxSize()) {
+            FlowDiagramCanvas(
+                screens = pageScreens,
+                transitions = pageTransitions,
+                bitmaps = bitmaps,
+                // The canvas gets the remaining fixed page space. It cannot
+                // paint or measure outside the page when the flow grows.
+                modifier = Modifier.fillMaxWidth().weight(1f).clipToBounds()
+            )
+            if (pages.size > 1) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = { selectedPage = (pageIndex - 1).coerceAtLeast(0) }, enabled = pageIndex > 0) { Text("‹") }
+                    Text("Page ${pageIndex + 1} / ${pages.size}", fontSize = 9.sp, color = Color(0xFF4D4D4D))
+                    TextButton(onClick = { selectedPage = (pageIndex + 1).coerceAtMost(pages.lastIndex) }, enabled = pageIndex < pages.lastIndex) { Text("›") }
+                }
             }
-            Spacer(Modifier.height(10.dp)); Row(Modifier.fillMaxWidth().background(Color(0xFFF8F8F8)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) { Column { Text("Title", fontSize = 9.sp, color = Color.Gray); Text(flow.name, fontSize = 12.sp) }; Column { Text("Version", fontSize = 9.sp, color = Color.Gray); Text("v1.0", fontSize = 12.sp) }; Column { Text("Created by", fontSize = 9.sp, color = Color.Gray); Text("You", fontSize = 12.sp) } }
+            Spacer(Modifier.height(8.dp)); Row(Modifier.fillMaxWidth().background(Color(0xFFF8F8F8)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) { Column { Text("Title", fontSize = 9.sp, color = Color.Gray); Text(flow.name, fontSize = 12.sp) }; Column { Text("Version", fontSize = 9.sp, color = Color.Gray); Text("v1.0", fontSize = 12.sp) }; Column { Text("Created by", fontSize = 9.sp, color = Color.Gray); Text("You", fontSize = 12.sp) } }
         }
     }
 }
@@ -384,17 +639,30 @@ private fun Modifier.diagramGrid() = this.drawBehind {
 ) = Canvas(modifier) {
     // All values are in pixels here. Convert dp explicitly to keep the canvas
     // geometry in sync with the Compose layout above on every screen density.
-    val columns = minOf(4, screens.size)
     val margin = 10.dp.toPx()
     val gap = 8.dp.toPx()
-    val nodeWidth = (size.width - margin * 2 - gap * (columns - 1)) / columns
-    val nodeHeight = nodeWidth * 2.15f
     val rowGap = 12.dp.toPx()
-    val leftInset = (size.width - (nodeWidth * columns + gap * (columns - 1))) / 2f
+    val aspectRatio = 2.15f
+    // Select the widest thumbnail layout that still fits every captured
+    // screenshot inside this fixed-size diagram page (up to seven per row).
+    // This is deliberately not a "best fit" choice. The product rule is
+    // exactly seven nodes per row whenever seven or more screenshots exist.
+    // With paging at 28 nodes, this also guarantees no more than four rows.
+    val columns = minOf(7, screens.size)
+    val rows = (screens.size + columns - 1) / columns
+    val widthBound = (size.width - margin * 2 - gap * (columns - 1)) / columns
+    val heightBound = (size.height - margin * 2 - rowGap * (rows - 1)) / (rows * aspectRatio)
+    val nodeWidth = minOf(widthBound, heightBound).coerceAtLeast(1f)
+    val nodeHeight = nodeWidth * aspectRatio
+    val contentHeight = rows * nodeHeight + (rows - 1) * rowGap
+    val topInset = ((size.height - contentHeight) / 2f).coerceAtLeast(0f)
     val positions = screens.mapIndexed { index, _ ->
         val row = index / columns
         val column = index % columns
-        Offset(leftInset + column * (nodeWidth + gap), 8f + row * (nodeHeight + rowGap))
+        val itemsInThisRow = minOf(columns, screens.size - row * columns)
+        val rowWidth = itemsInThisRow * nodeWidth + (itemsInThisRow - 1) * gap
+        val rowInset = (size.width - rowWidth) / 2f
+        Offset(rowInset + column * (nodeWidth + gap), topInset + row * (nodeHeight + rowGap))
     }
     val nodeById = screens.withIndex().associate { it.value.id to it.index }
     val stroke = Color(0xFF555555)

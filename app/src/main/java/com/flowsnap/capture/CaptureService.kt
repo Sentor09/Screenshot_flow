@@ -24,10 +24,11 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.res.ResourcesCompat
 import com.flowsnap.MainActivity
-import java.io.File
+import com.flowsnap.R
+import com.flowsnap.data.ScreenshotStorage
 import java.io.FileOutputStream
-import java.util.UUID
 
 /** Owns exactly one user-approved MediaProjection session and its draggable capture control. */
 class CaptureService : Service() {
@@ -81,7 +82,16 @@ class CaptureService : Service() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val params = WindowManager.LayoutParams(128, 128, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.START; x = 48; y = 180 }
         bubble?.let { runCatching { windowManager.removeView(it) } }
-        bubble = TextView(this).apply { text = "●\nCAPTURE"; textSize = 11f; gravity = Gravity.CENTER; setTextColor(android.graphics.Color.WHITE); setBackgroundColor(android.graphics.Color.rgb(38, 78, 150)); elevation = 12f; setOnTouchListener(DragCaptureListener(params)) }
+        bubble = TextView(this).apply {
+            text = "●\nCAPTURE"
+            textSize = 11f
+            gravity = Gravity.CENTER
+            typeface = ResourcesCompat.getFont(this@CaptureService, R.font.urbanist_medium)
+            setTextColor(android.graphics.Color.WHITE)
+            setBackgroundColor(android.graphics.Color.rgb(38, 78, 150))
+            elevation = 12f
+            setOnTouchListener(DragCaptureListener(params))
+        }
         windowManager.addView(bubble, params)
     }
 
@@ -122,7 +132,9 @@ class CaptureService : Service() {
         val plane = image.planes[0]; val width = image.width; val height = image.height; val rowPadding = plane.rowStride - plane.pixelStride * width
         val bitmap = Bitmap.createBitmap(width + rowPadding / plane.pixelStride, height, Bitmap.Config.ARGB_8888)
         bitmap.copyPixelsFromBuffer(plane.buffer); image.close()
-        val output = File(filesDir, "captures").also { it.mkdirs() }.resolve("${UUID.randomUUID()}.png")
+        // Store the full-quality PNG in FlowSnap's app-private internal
+        // storage. Room records this file path when the user keeps it.
+        val output = ScreenshotStorage.newCaptureFile(this, flowId)
         FileOutputStream(output).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }; bitmap.recycle()
         openReview(output.absolutePath, (params.x + 64f) / resources.displayMetrics.widthPixels, (params.y + 64f) / resources.displayMetrics.heightPixels)
     }
