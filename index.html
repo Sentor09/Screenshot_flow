@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CSS Image Wipe</title>
+  <style>
+    :root { --cycle-duration: 3s; --divider-width: 7px; }
+    * { box-sizing: border-box; }
+    body {
+      min-height: 100vh; margin: 0; color: #ecf2ff;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at 84% 12%, #253a70 0, transparent 31rem), #0c1020;
+    }
+    .app { max-width: 1240px; min-height: 100vh; margin: auto; padding: 48px 28px; }
+    header { margin-bottom: 30px; }
+    h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 3.1rem); letter-spacing: -.06em; }
+    header p { max-width: 530px; margin: 10px 0 0; color: #aab6d4; line-height: 1.55; }
+    .workspace { display: grid; grid-template-columns: minmax(270px, 360px) 1fr; gap: 26px; align-items: stretch; }
+    .panel, .preview-card { border: 1px solid rgba(190, 207, 255, .13); background: rgba(20, 27, 51, .78); box-shadow: 0 22px 65px rgba(0, 0, 0, .22); }
+    .panel { border-radius: 22px; padding: 20px; }
+    .control + .control { margin-top: 18px; }
+    .label-row, .duration-line { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    label { font-weight: 650; font-size: .94rem; }
+    .hint, output { color: #9eacca; font-size: .8rem; }
+    .upload {
+      position: relative; display: grid; place-items: center; min-height: 104px; margin-top: 9px; padding: 14px; overflow: hidden;
+      cursor: pointer; border: 1px dashed #5e70a1; border-radius: 15px; background: rgba(102, 127, 190, .08); color: #bdc9e8;
+      transition: .2s ease;
+    }
+    .upload:hover, .upload:focus-within { border-color: #98b3ff; background: rgba(102, 127, 190, .17); }
+    .upload input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+    .upload strong { display: block; text-align: center; font-size: .88rem; }
+    .upload span { display: block; margin-top: 5px; color: #8493b7; font-size: .75rem; text-align: center; }
+    .upload-preview { position: absolute; inset: 0; display: none; width: 100%; height: 100%; object-fit: cover; }
+    .upload.has-image .upload-preview { display: block; }
+    .upload.has-image > div { position: relative; z-index: 1; padding: 6px 9px; border-radius: 7px; background: rgba(10, 16, 34, .72); color: #fff; }
+    .upload.has-image > div span { color: #d5ddf5; }
+    .duration { margin-top: 28px; padding-top: 21px; border-top: 1px solid rgba(190, 207, 255, .12); }
+    .text-input, .size-input { width: 100%; margin-top: 10px; padding: 11px 12px; border: 1px solid #465577; border-radius: 10px; outline: none; background: #11182c; color: #edf3ff; font: inherit; }
+    .text-input:focus, .size-input:focus { border-color: #9bb7ff; box-shadow: 0 0 0 3px rgba(155,183,255,.13); }
+    .export { margin-top: 24px; padding-top: 21px; border-top: 1px solid rgba(190, 207, 255, .12); }
+    .size-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+    .size-grid label { color: #9eacca; font-size: .75rem; }
+    .size-input { margin-top: 5px; }
+    .bar-control { display: block; margin-top: 14px; color: #9eacca; font-size: .75rem; }
+    .export-action { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
+    button { flex: 1; padding: 11px 14px; cursor: pointer; border: 0; border-radius: 10px; background: #a4bdff; color: #0e1830; font: 750 .88rem/1 Inter, sans-serif; transition: transform .15s, background .15s; }
+    button:hover { background: #c1d1ff; transform: translateY(-1px); } button:disabled { cursor: not-allowed; opacity: .55; transform: none; }
+    .file-size { min-width: 68px; color: #9eacca; font-size: .78rem; text-align: right; }
+    .css-note { margin: 17px 0 0; color: #91a1c6; font-size: .78rem; line-height: 1.45; }
+    .preview-card { position: relative; display: flex; flex-direction: column; min-width: 0; border-radius: 22px; padding: 20px; }
+    .preview-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+    .preview-top span { color: #99a8cb; font-size: .8rem; font-weight: 700; letter-spacing: .11em; text-transform: uppercase; }
+    .status { display: flex; align-items: center; gap: 7px; color: #aebfe8; font-size: .8rem; }
+    .status::before { width: 7px; height: 7px; border-radius: 50%; background: #91e8bc; box-shadow: 0 0 14px #69d9a0; content: ""; }
+    .compare {
+      position: relative; width: 100%; aspect-ratio: var(--preview-width) / var(--preview-height); margin: auto; overflow: hidden; border-radius: 15px;
+      background: linear-gradient(135deg, #263653, #182138); isolation: isolate;
+    }
+    .preview-card .compare { align-self: center; }
+    .base, .after-image { position: absolute; inset: 0; width: 100%; height: 100%; background: center / cover no-repeat; }
+    .base { background-image: var(--before-image); }
+    .wipe-track {
+      position: absolute; inset: 0; overflow: hidden; transform: translateX(calc(-100% - var(--divider-width)));
+      animation: wipe-track var(--cycle-duration) cubic-bezier(.65, 0, .35, 1) infinite alternate;
+      will-change: transform;
+    }
+    .after-image {
+      background-image: var(--after-image); transform: translateX(calc(100% + var(--divider-width)));
+      animation: lock-image var(--cycle-duration) cubic-bezier(.65, 0, .35, 1) infinite alternate;
+      will-change: transform;
+    }
+    .divider { position: absolute; z-index: 2; top: 0; right: 0; width: var(--divider-width); height: 100%; background: white; box-shadow: 0 0 12px rgba(255,255,255,.75); }
+    .webm-preview { position: absolute; z-index: 3; inset: 0; display: none; width: 100%; height: 100%; object-fit: cover; background: #10182a; }
+    .compare.has-webm .webm-preview { display: block; }
+    .empty-state { position: absolute; inset: 0; display: grid; place-items: center; z-index: 4; text-align: center; color: #aebddd; pointer-events: none; background: linear-gradient(135deg, rgba(23, 33, 56, .68), rgba(23, 33, 56, .18)); transition: opacity .25s; }
+    .empty-state strong { display: block; color: #eaf0ff; font-size: 1rem; }
+    .empty-state span { display: block; margin-top: 5px; font-size: .83rem; }
+    .compare.ready .empty-state { opacity: 0; }
+    @keyframes wipe-track { from { transform: translateX(calc(-100% - var(--divider-width))); } to { transform: translateX(var(--divider-width)); } }
+    @keyframes lock-image { from { transform: translateX(calc(100% + var(--divider-width))); } to { transform: translateX(calc(0px - var(--divider-width))); } }
+    @media (max-width: 760px) { .app { padding: 30px 16px; } .workspace { grid-template-columns: 1fr; } .compare { min-height: 220px; } }
+    @media (prefers-reduced-motion: reduce) { .wipe-track, .after-image { animation-duration: 5s; } }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header><h1>CSS Image Wipe</h1><p>Load a before and after image, then preview a smooth, CSS-only horizontal reveal.</p></header>
+    <section class="workspace">
+      <aside class="panel" aria-label="Animation controls">
+        <div class="control"><div class="label-row"><label for="before-upload">Image 1</label><span class="hint">Before</span></div><label class="upload"><input id="before-upload" type="file" accept="image/*"><img class="upload-preview" id="before-preview" alt="Selected before image preview"><div><strong>Choose before image</strong><span>PNG, JPG, WebP, or GIF</span></div></label></div>
+        <div class="control"><div class="label-row"><label for="after-upload">Image 2</label><span class="hint">After</span></div><label class="upload"><input id="after-upload" type="file" accept="image/*"><img class="upload-preview" id="after-preview" alt="Selected after image preview"><div><strong>Choose after image</strong><span>PNG, JPG, WebP, or GIF</span></div></label></div>
+        <div class="duration"><div class="duration-line"><label for="duration">Cycle duration</label><span class="hint">1–15 seconds</span></div><input class="text-input" id="duration" inputmode="decimal" value="3s" aria-describedby="duration-help"><span class="hint" id="duration-help">Type a value such as 2.5s.</span></div>
+        <div class="export"><div class="duration-line"><label>Export size</label><span class="hint">WebM resolution</span></div><div class="size-grid"><label for="canvas-width">Width<input class="size-input" id="canvas-width" type="number" min="64" max="4000" value="500"></label><label for="canvas-height">Height<input class="size-input" id="canvas-height" type="number" min="64" max="4000" value="786"></label></div><label class="bar-control" for="divider-width">Divider thickness (px)<input class="size-input" id="divider-width" type="number" min="1" max="100" value="7"></label><div class="export-action"><button id="export-webm" type="button" disabled>Create WebM preview</button><span class="file-size" id="file-size" aria-live="polite">Add images</span></div><p class="css-note">Create a preview to inspect the exact exported WebM before downloading it.</p></div>
+      </aside>
+      <section class="preview-card" aria-label="Live animation preview">
+        <div class="preview-top"><span>Live preview</span><div class="status">Auto-looping</div></div>
+        <div class="compare" id="compare">
+          <div class="base"></div><div class="wipe-track"><div class="after-image"></div><div class="divider"></div></div><video class="webm-preview" id="webm-preview" muted loop autoplay playsinline aria-label="Generated WebM preview"></video>
+          <div class="empty-state"><div><strong>Your animation will appear here</strong><span>Upload both images to begin.</span></div></div>
+        </div>
+      </section>
+    </section>
+  </main>
+  <script>
+    const compare = document.getElementById('compare'), duration = document.getElementById('duration');
+    const exportButton = document.getElementById('export-webm'), fileSize = document.getElementById('file-size');
+    const dividerInput = document.getElementById('divider-width');
+    const previewVideo = document.getElementById('webm-preview'); let previewUrl = null, exportedBlob = null;
+    const uploads = { 'before-upload': '--before-image', 'after-upload': '--after-image' }, images = {}, loaded = new Set();
+    function invalidateExport() { exportedBlob = null; compare.classList.remove('has-webm'); previewVideo.pause(); if (loaded.size === 2) { exportButton.textContent = 'Create WebM preview'; fileSize.textContent = 'Preview needs update'; } }
+    function syncPreviewSize() {
+      const width = Math.min(4000, Math.max(64, Number(document.getElementById('canvas-width').value) || 500));
+      const height = Math.min(4000, Math.max(64, Number(document.getElementById('canvas-height').value) || 786));
+      const availableWidth = compare.parentElement.clientWidth - 40, availableHeight = Math.max(220, window.innerHeight * .68);
+      const scale = Math.min(availableWidth / width, availableHeight / height);
+      compare.style.width = `${Math.floor(width * scale)}px`; compare.style.height = `${Math.floor(height * scale)}px`;
+      compare.style.setProperty('--preview-width', width); compare.style.setProperty('--preview-height', height);
+    }
+    for (const [id, cssVariable] of Object.entries(uploads)) document.getElementById(id).addEventListener('change', event => {
+      const file = event.target.files[0]; if (!file) return; const reader = new FileReader();
+      reader.onload = () => { invalidateExport(); images[id] = reader.result; compare.style.setProperty(cssVariable, `url("${reader.result}")`); const preview = document.getElementById(id.replace('-upload', '-preview')); preview.src = reader.result; preview.closest('.upload').classList.add('has-image'); loaded.add(id); compare.classList.toggle('ready', loaded.size === 2); exportButton.disabled = loaded.size !== 2; if (loaded.size === 2) { fileSize.textContent = 'Ready to create'; exportButton.textContent = 'Create WebM preview'; } };
+      reader.readAsDataURL(file);
+    });
+    function durationSeconds() { const seconds = parseFloat(duration.value); return Number.isFinite(seconds) ? Math.min(15, Math.max(1, seconds)) : 3; }
+    function applyDuration(normalize = false) { const typed = parseFloat(duration.value); if (!Number.isFinite(typed)) return; const seconds = Math.min(15, Math.max(1, typed)); document.documentElement.style.setProperty('--cycle-duration', `${seconds}s`); invalidateExport(); if (normalize) duration.value = `${seconds}s`; }
+    duration.addEventListener('input', () => applyDuration());
+    duration.addEventListener('change', () => applyDuration(true));
+    function applyDividerWidth(normalize = false) { const value = Math.min(100, Math.max(1, Number(dividerInput.value) || 1)); document.documentElement.style.setProperty('--divider-width', `${value}px`); invalidateExport(); if (normalize) dividerInput.value = value; }
+    dividerInput.addEventListener('input', () => applyDividerWidth());
+    dividerInput.addEventListener('change', () => applyDividerWidth(true));
+    for (const id of ['canvas-width', 'canvas-height']) document.getElementById(id).addEventListener('input', () => { syncPreviewSize(); invalidateExport(); });
+    window.addEventListener('resize', syncPreviewSize); syncPreviewSize();
+    function loadImage(source) { return new Promise((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = reject; image.src = source; }); }
+    function drawCover(ctx, image, width, height) { const scale = Math.max(width / image.width, height / image.height), drawWidth = image.width * scale, drawHeight = image.height * scale; ctx.drawImage(image, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight); }
+    const readableSize = bytes => bytes < 1048576 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1048576).toFixed(2)} MB`;
+    async function recordWebM(before, after, width, height, seconds, dividerWidth, bitrate, fps, attempt) {
+      const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d'); canvas.width = width; canvas.height = height;
+      const stream = canvas.captureStream(fps), mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate }), chunks = [];
+      recorder.ondataavailable = event => { if (event.data.size) { chunks.push(event.data); fileSize.textContent = `Encoding ${attempt}: ${readableSize(chunks.reduce((total, chunk) => total + chunk.size, 0))}`; } };
+      const result = new Promise(resolve => recorder.onstop = () => resolve(new Blob(chunks, { type: 'video/webm' })));
+      recorder.start(250); const start = performance.now();
+      const render = now => { const elapsed = (now - start) / (seconds * 1000), cycle = Math.min(2, elapsed), progress = cycle <= 1 ? cycle : 2 - cycle, wipeEdge = progress * (width + 2 * dividerWidth) - dividerWidth, dividerLeft = wipeEdge - dividerWidth; ctx.clearRect(0, 0, width, height); drawCover(ctx, before, width, height); ctx.save(); ctx.beginPath(); ctx.rect(0, 0, Math.max(0, wipeEdge), height); ctx.clip(); drawCover(ctx, after, width, height); ctx.restore(); ctx.fillStyle = '#fff'; ctx.fillRect(dividerLeft, 0, dividerWidth, height); if (elapsed < 2) requestAnimationFrame(render); else recorder.stop(); };
+      requestAnimationFrame(render); return result;
+    }
+    exportButton.addEventListener('click', async () => {
+      if (exportedBlob) { const downloadUrl = URL.createObjectURL(exportedBlob), link = Object.assign(document.createElement('a'), { href: downloadUrl, download: 'css-image-wipe.webm' }); link.click(); setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000); return; }
+      if (!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream) { fileSize.textContent = 'WebM export unsupported'; return; }
+      const width = Math.round(Math.min(4000, Math.max(64, Number(document.getElementById('canvas-width').value) || 500))), height = Math.round(Math.min(4000, Math.max(64, Number(document.getElementById('canvas-height').value) || 786))), seconds = durationSeconds(), dividerWidth = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--divider-width')) || 7, limit = 1048576;
+      exportButton.disabled = true; exportButton.textContent = 'Creating preview…';
+      try {
+        const [before, after] = await Promise.all([loadImage(images['before-upload']), loadImage(images['after-upload'])]);
+        const attempts = [[1,30,.88],[.8,24,.68],[.64,20,.5],[.5,15,.34]]; let blob = null;
+        const targetBitrate = Math.max(100000, Math.floor(limit * 8 * .85 / (seconds * 2)));
+        for (let i = 0; i < attempts.length; i++) { const [scale, fps, quality] = attempts[i], exportWidth = Math.max(64, Math.round(width * scale)), exportHeight = Math.max(64, Math.round(height * scale)); const candidate = await recordWebM(before, after, exportWidth, exportHeight, seconds, dividerWidth * scale, Math.floor(targetBitrate * quality), fps, `${i + 1}/${attempts.length}`); if (candidate.size <= limit) { blob = candidate; break; } }
+        if (!blob) throw new Error('Could not meet the 1 MB limit');
+        exportedBlob = blob; if (previewUrl) URL.revokeObjectURL(previewUrl); previewUrl = URL.createObjectURL(blob); previewVideo.src = previewUrl; compare.classList.add('has-webm'); previewVideo.play().catch(() => {}); fileSize.textContent = `Ready: ${readableSize(blob.size)} (≤ 1 MB)`; exportButton.textContent = 'Download WebM';
+      } catch { fileSize.textContent = 'Could not create a WebM under 1 MB'; exportButton.textContent = 'Create WebM preview'; }
+      exportButton.disabled = false;
+    });
+
+  </script>
+</body>
+</html>
