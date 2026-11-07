@@ -25,7 +25,9 @@ data class FlowEntity(
     val showVersion: Boolean = true,
     val showCreatedAt: Boolean = true,
     val showCreatedBy: Boolean = true,
-    val showAppVersion: Boolean = false
+    val showAppVersion: Boolean = false,
+    val showMobileStencils: Boolean = true,
+    val connectorColor: Long = 0xFF69B83AL
 )
 
 @Entity(tableName = "screens")
@@ -70,7 +72,7 @@ data class TransitionEntity(
     @Query("DELETE FROM flows WHERE id = :flowId") suspend fun deleteFlow(flowId: String)
 }
 
-@Database(entities = [FlowEntity::class, ScreenEntity::class, TransitionEntity::class], version = 6, exportSchema = false)
+@Database(entities = [FlowEntity::class, ScreenEntity::class, TransitionEntity::class], version = 7, exportSchema = false)
 abstract class FlowDatabase : RoomDatabase() { abstract fun flowDao(): FlowDao
     companion object { fun create(context: Context) = Room.databaseBuilder(context, FlowDatabase::class.java, "flowsnap.db").fallbackToDestructiveMigration().build() }
 }

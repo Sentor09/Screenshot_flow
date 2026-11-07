@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.app.ActivityOptions
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -44,7 +45,10 @@ class CaptureService : Service() {
         if (intent?.action == ACTION_STOP) { stopCapture(); return START_NOT_STICKY }
         if (intent?.action == ACTION_RESUME) {
             captureRequested = false
-            if (sessionStarted && bubble == null && Settings.canDrawOverlays(this)) {
+            if (sessionStarted && Settings.canDrawOverlays(this)) {
+                // The previous bubble is removed as the review screen opens.
+                // Always attach a fresh, single overlay here instead of trying to
+                // reuse a view that WindowManager may already have detached.
                 showBubble()
             }
             return START_NOT_STICKY
@@ -120,7 +124,12 @@ class CaptureService : Service() {
         captureRequested = true
         // Remove our own overlay before asking ImageReader for the next projected frame.
         if (attempt == 0) {
-            bubble?.let { runCatching { windowManager.removeView(it) } }; bubble = null
+            // Keep an attached (but completely transparent) overlay while the
+            // screen frame is acquired and the review activity is launched.
+            // Android 15/16 require a visible overlay window for this background
+            // transition; removing it here can cause the review activity launch
+            // to be silently blocked. Alpha zero keeps FlowSnap out of the bitmap.
+            bubble?.alpha = 0f
             Handler(Looper.getMainLooper()).postDelayed({ capture(params, 1) }, 180)
             return
         }
@@ -140,10 +149,54 @@ class CaptureService : Service() {
     }
 
     private fun openReview(path: String?, markerX: Float, markerY: Float) {
-        startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP).putExtra(EXTRA_FLOW_ID, flowId).putExtra(EXTRA_PATH, path).putExtra(EXTRA_MARKER_X, markerX).putExtra(EXTRA_MARKER_Y, markerY))
+        val reviewIntent = Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            .putExtra(EXTRA_FLOW_ID, flowId)
+            .putExtra(EXTRA_PATH, path)
+            .putExtra(EXTRA_MARKER_X, markerX)
+            .putExtra(EXTRA_MARKER_Y, markerY)
+
+        // Route the user-initiated overlay tap through a PendingIntent with the
+        // Android 14+ background-activity-launch opt-in. This keeps the review
+        // screen reliable when FlowSnap is behind Home or another app.
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val creatorOptions = if (android.os.Build.VERSION.SDK_INT >= 35) {
+            ActivityOptions.makeBasic().apply {
+                setPendingIntentCreatorBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                )
+            }.toBundle()
+        } else null
+        val reviewPendingIntent = PendingIntent.getActivity(this, REVIEW_REQUEST_CODE, reviewIntent, flags, creatorOptions)
+        runCatching {
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                val sendOptions = ActivityOptions.makeBasic().apply {
+                    pendingIntentBackgroundActivityStartMode = ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                }
+                reviewPendingIntent.send(this, 0, null, null, null, null, sendOptions.toBundle())
+            } else {
+                reviewPendingIntent.send()
+            }
+        }.onFailure {
+            // Keep the old direct launch as a fallback for vendor builds that
+            // reject BAL options despite an active overlay window.
+            startActivity(reviewIntent)
+        }
+        // The transparent anchor is no longer needed after the launch request.
+        // Keep a reference to the *old* overlay.  A user can press Keep + Next
+        // before this delayed callback runs; in that case ACTION_RESUME has
+        // already created a new button.  Removing the mutable `bubble` field
+        // here used to remove that new button, leaving the next capture stuck.
+        val reviewBubble = bubble
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (bubble === reviewBubble) {
+                reviewBubble?.let { runCatching { windowManager.removeView(it) } }
+                bubble = null
+            }
+        }, 500)
     }
 
     private fun stopCapture() { bubble?.let { runCatching { windowManager.removeView(it) } }; bubble = null; sessionStarted = false; captureRequested = false; runCatching { reader.close() }; runCatching { projection.stop() }; stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
     override fun onBind(intent: Intent?): IBinder? = null
-    companion object { const val CHANNEL_ID = "capture"; const val ACTION_STOP = "com.flowsnap.STOP"; const val ACTION_RESUME = "com.flowsnap.RESUME"; const val EXTRA_FLOW_ID = "flowId"; const val EXTRA_RESULT_CODE = "resultCode"; const val EXTRA_RESULT_DATA = "resultData"; const val EXTRA_PATH = "path"; const val EXTRA_MARKER_X = "markerX"; const val EXTRA_MARKER_Y = "markerY" }
+    companion object { const val CHANNEL_ID = "capture"; const val ACTION_STOP = "com.flowsnap.STOP"; const val ACTION_RESUME = "com.flowsnap.RESUME"; const val EXTRA_FLOW_ID = "flowId"; const val EXTRA_RESULT_CODE = "resultCode"; const val EXTRA_RESULT_DATA = "resultData"; const val EXTRA_PATH = "path"; const val EXTRA_MARKER_X = "markerX"; const val EXTRA_MARKER_Y = "markerY"; private const val REVIEW_REQUEST_CODE = 92 }
 }
