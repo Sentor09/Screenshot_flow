@@ -8,7 +8,8 @@ Android-first MVP for turning a user-consented sequence of app screenshots into 
 - Home UI: create and open named flows
 - Room database for local flow metadata
 - Diagram destination screen and explicit capture consent entry point
-- Android 14+ `mediaProjection` foreground-service declaration and notification host
+- MediaProjection foreground service with a draggable overlay capture control and review step
+- PDF export through the Android Storage Access Framework
 
 ## Run it
 
@@ -16,13 +17,12 @@ Android-first MVP for turning a user-consented sequence of app screenshots into 
 2. Let Gradle sync and install Android SDK Platform 35 if Android Studio asks.
 3. Select an Android 8.0+ device/emulator and press **Run**.
 
-There is no checked-in Gradle wrapper because this empty workspace did not contain a Gradle installation to generate it. Android Studio can sync the project directly; after it does, use **Gradle > wrapper** or `gradle wrapper` to add a wrapper for command-line builds.
+The Gradle wrapper is checked in. To build from the command line, use a Java 17 JDK and run `gradlew.bat :app:assembleDebug` on Windows.
 
 ## Planned milestones
 
-2. `MediaProjection` session: consume the one-time result inside `CaptureService`, run an `ImageReader` virtual display, render a user-enabled overlay control, and persist screenshots plus normalized tap markers.
-3. Editor: Room tables for nodes/transitions; a pan/zoom Compose canvas, draggable nodes, manually-marked transition anchors, and arrows.
-4. Delivery: local PNG canvas export through `Bitmap`/`Canvas`, PDF export through `PdfDocument`, Android share sheet, tests, and a release-ready privacy/data-deletion pass.
+2. Editor: pan/zoom Compose canvas, draggable nodes, manually-marked transition anchors, and arrows.
+3. Delivery: diagram PNG export through `Bitmap`/`Canvas`, Android share sheet, tests, and a release-ready privacy/data-deletion pass.
 
 ## Important capture rules
 

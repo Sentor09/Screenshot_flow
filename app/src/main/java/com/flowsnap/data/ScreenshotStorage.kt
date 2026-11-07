@@ -25,4 +25,16 @@ object ScreenshotStorage {
     fun deleteFlowFolder(context: Context, flowId: String) {
         File(context.filesDir, "$ROOT_FOLDER/$flowId").deleteRecursively()
     }
+
+    /** Best-effort startup reconciliation after a failed capture or file delete. */
+    fun deleteUnreferencedFiles(context: Context, referencedPaths: Set<String>) {
+        val root = File(context.filesDir, ROOT_FOLDER)
+        root.walkTopDown()
+            .filter { it.isFile && it.extension.equals("png", ignoreCase = true) }
+            .filter { it.absolutePath !in referencedPaths }
+            .forEach { runCatching { it.delete() } }
+        root.walkBottomUp().filter { it.isDirectory && it != root }.forEach { directory ->
+            if (directory.list()?.isEmpty() == true) runCatching { directory.delete() }
+        }
+    }
 }
