@@ -17,6 +17,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Canvas
@@ -27,6 +29,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -156,9 +159,37 @@ class MainActivity : ComponentActivity() {
 
 class FlowViewModel(application: android.app.Application) : AndroidViewModel(application) {
     private val dao = FlowDatabase.create(application).flowDao()
-    val flows = dao.observeAll().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    // Keep the gallery query alive for the app lifetime. This prevents a
+    // transient empty Home grid when returning from a completed capture.
+    val flows = dao.observeAll().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     fun createFlow(name: String) = viewModelScope.launch { val now = System.currentTimeMillis(); dao.upsert(FlowEntity(UUID.randomUUID().toString(), name.trim(), now, now)) }
     fun createFlow(open: (FlowEntity) -> Unit) = viewModelScope.launch { val now = System.currentTimeMillis(); val flow = FlowEntity(UUID.randomUUID().toString(), "My new app flow", now, now); dao.upsert(flow); open(flow) }
+    fun updateFlowMetadata(
+        flow: FlowEntity,
+        title: String,
+        version: String,
+        createdBy: String,
+        showTitle: Boolean,
+        showVersion: Boolean,
+        showCreatedAt: Boolean,
+        showCreatedBy: Boolean,
+        showAppVersion: Boolean,
+        onSaved: (FlowEntity) -> Unit
+    ) = viewModelScope.launch {
+        val updated = flow.copy(
+            name = title.trim().ifBlank { flow.name },
+            diagramVersion = version.trim().ifBlank { flow.diagramVersion },
+            createdBy = createdBy.trim().ifBlank { flow.createdBy },
+            showTitle = showTitle,
+            showVersion = showVersion,
+            showCreatedAt = showCreatedAt,
+            showCreatedBy = showCreatedBy,
+            showAppVersion = showAppVersion,
+            updatedAt = System.currentTimeMillis()
+        )
+        dao.upsert(updated)
+        onSaved(updated)
+    }
     private suspend fun persistCapture(review: CaptureReview) {
         val previous = dao.lastScreen(review.flowId)
         val now = System.currentTimeMillis()
@@ -184,6 +215,7 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
     }
     fun screens(flowId: String) = dao.observeScreens(flowId)
     fun transitions(flowId: String) = dao.observeTransitions(flowId)
+    fun flow(flowId: String) = dao.observeFlow(flowId)
 }
 
 private sealed interface Screen { data object Home : Screen; data class Diagram(val flow: FlowEntity) : Screen }
@@ -328,21 +360,25 @@ private sealed interface Screen { data object Home : Screen; data class Diagram(
     val context = androidx.compose.ui.platform.LocalContext.current
     val tipPreferences = remember { context.getSharedPreferences("flowsnap", Context.MODE_PRIVATE) }
     val projectionManager = remember { context.getSystemService(MediaProjectionManager::class.java) }
+    val storedFlow by vm.flow(flow.id).collectAsStateWithLifecycle(initialValue = flow)
+    // Room can emit null briefly if this diagram is being deleted. Keep the
+    // last route argument as a safe rendering fallback.
+    val currentFlow = storedFlow ?: flow
     val screens by vm.screens(flow.id).collectAsStateWithLifecycle(initialValue = emptyList())
     val transitions by vm.transitions(flow.id).collectAsStateWithLifecycle(initialValue = emptyList())
     var pendingResult by remember { mutableStateOf<androidx.activity.result.ActivityResult?>(null) }
     var showTips by remember { mutableStateOf(false) }
     var captureLaunchInProgress by remember { mutableStateOf(false) }
     var showDeleteConfirmation by remember { mutableStateOf(false) }
-    var showExpandedPreview by remember { mutableStateOf(false) }
+    var showDiagramSettings by remember { mutableStateOf(false) }
     val exportPdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
-        uri?.let { exportFlowPdf(context, it, screens, transitions, flow) }
+        uri?.let { exportFlowPdf(context, it, screens, transitions, currentFlow) }
     }
     val captureConsent = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         captureLaunchInProgress = false
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
             pendingResult = result
-            if (tipPreferences.getBoolean("hide_capture_tip", false)) ContextCompat.startForegroundService(context, Intent(context, CaptureService::class.java).putExtra(CaptureService.EXTRA_FLOW_ID, flow.id).putExtra(CaptureService.EXTRA_RESULT_CODE, result.resultCode).putExtra(CaptureService.EXTRA_RESULT_DATA, result.data))
+                    if (tipPreferences.getBoolean("hide_capture_tip", false)) ContextCompat.startForegroundService(context, Intent(context, CaptureService::class.java).putExtra(CaptureService.EXTRA_FLOW_ID, currentFlow.id).putExtra(CaptureService.EXTRA_RESULT_CODE, result.resultCode).putExtra(CaptureService.EXTRA_RESULT_DATA, result.data))
             else showTips = true
         }
     }
@@ -370,42 +406,30 @@ private sealed interface Screen { data object Home : Screen; data class Diagram(
     val hasScreens = screens.isNotEmpty()
     // The bottom controls must stay inside the safe area on both gesture and
     // three-button navigation devices.
-    BoxWithConstraints(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).diagramGrid()) {
-        // The document lives only in this protected middle area. This prevents
-        // it from ever sitting below the Home/Settings controls or beneath the
-        // image-add / capture / bottom action controls.
-        // Keep a deliberately generous exclusion zone around the fixed editor
-        // controls. The document is content, not a layer over the controls.
-        // In particular, 220dp reserves room for the Add Image button above
-        // the large capture button and the three actions at the lower left.
-        val topControlsClearance = 112.dp
-        val bottomControlsClearance = 220.dp
-        val safeDiagramHeight = (maxHeight - topControlsClearance - bottomControlsClearance).coerceAtLeast(0.dp)
-        // 600 is expressed as physical pixels so this page looks like the
-        // reference on phones of different densities. It is also capped by
-        // the safe middle area and width of the actual device.
-        val requestedPageSide = with(LocalDensity.current) { 600.toDp() }
-        val pageSide = minOf(requestedPageSide, maxWidth * .88f, safeDiagramHeight)
-        val pageTopPadding = topControlsClearance + ((safeDiagramHeight - pageSide) / 2)
+    Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).diagramGrid()) {
+        // The diagram is one tall document: screenshots flow downward in five
+        // columns and this area scrolls independently of the fixed controls.
+        // The padding keeps document content clear of those controls.
         EditorCircle(Icons.Default.Home, "Home", goBack, modifier = Modifier.align(Alignment.TopStart).padding(20.dp))
-        EditorCircle(Icons.Default.Settings, "Settings", onClick = { }, enabled = hasScreens, modifier = Modifier.align(Alignment.TopCenter).padding(top = 20.dp))
+        EditorCircle(Icons.Default.Settings, "Settings", onClick = { showDiagramSettings = true }, enabled = hasScreens, modifier = Modifier.align(Alignment.TopCenter).padding(top = 20.dp))
         if (screens.isEmpty()) Text("Create a diagram with the + option below", Modifier.align(Alignment.Center), color = Color(0xFF24519B), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        else DiagramPreview(
-            screens,
-            transitions,
-            flow,
-            // Fixed document page: same size for every diagram, independent of
-            // screenshot count, and constrained to the protected middle area.
-            Modifier.align(Alignment.TopCenter).padding(top = pageTopPadding)
-                // This is a strict, square 600px page (or the safe maximum on
-                // a smaller screen). Its size is independent of node count.
-                .size(pageSide)
-                .clipToBounds(),
-            onOpenPreview = { showExpandedPreview = true }
-        )
+        else {
+            DiagramPreview(
+                screens = screens,
+                transitions = transitions,
+                flow = currentFlow,
+                // The white card itself stays in this protected viewport. Only
+                // its document content scrolls, so its rounded top and bottom
+                // corners remain visible at every scroll position.
+                modifier = Modifier.align(Alignment.TopCenter)
+                    .padding(top = 108.dp, bottom = 190.dp)
+                    .fillMaxWidth(.90f)
+                    .fillMaxHeight()
+            )
+        }
         Row(Modifier.align(Alignment.BottomStart).padding(22.dp), horizontalArrangement = Arrangement.spacedBy(26.dp)) {
             EditorCircle(Icons.Default.Save, "Save", onClick = { }, enabled = hasScreens)
-            EditorCircle(Icons.Default.CloudUpload, "Export PDF", onClick = { exportPdf.launch("${flow.name}.pdf") }, enabled = hasScreens)
+            EditorCircle(Icons.Default.CloudUpload, "Export PDF", onClick = { exportPdf.launch("${currentFlow.name}.pdf") }, enabled = hasScreens)
             EditorCircle(Icons.Default.Delete, "Delete diagram", onClick = { showDeleteConfirmation = true })
         }
         Column(Modifier.align(Alignment.BottomEnd).padding(22.dp), verticalArrangement = Arrangement.spacedBy(18.dp), horizontalAlignment = Alignment.End) {
@@ -413,25 +437,14 @@ private sealed interface Screen { data object Home : Screen; data class Diagram(
             EditorCircle(Icons.Default.Add, "Capture", beginCapture, large = true, enabled = !captureLaunchInProgress)
         }
     }
-    if (showExpandedPreview) {
-        Dialog(
-            onDismissRequest = { showExpandedPreview = false },
-            properties = DialogProperties(usePlatformDefaultWidth = false)
-        ) {
-            Box(Modifier.fillMaxSize().background(Color(0xCC000000)), contentAlignment = Alignment.Center) {
-                DiagramPreview(
-                    screens = screens,
-                    transitions = transitions,
-                    flow = flow,
-                    modifier = Modifier.fillMaxWidth(.94f).height(520.dp),
-                    onOpenPreview = null
-                )
-                TextButton(
-                    onClick = { showExpandedPreview = false },
-                    modifier = Modifier.align(Alignment.TopEnd).padding(20.dp)
-                ) { Text("CLOSE", color = Color.White) }
+    if (showDiagramSettings) {
+        DiagramSettingsDialog(
+            flow = currentFlow,
+            onDismiss = { showDiagramSettings = false },
+            onSave = { title, version, createdBy, showTitle, showVersion, showCreatedAt, showCreatedBy, showAppVersion ->
+                vm.updateFlowMetadata(currentFlow, title, version, createdBy, showTitle, showVersion, showCreatedAt, showCreatedBy, showAppVersion) { showDiagramSettings = false }
             }
-        }
+        )
     }
     if (showDeleteConfirmation) {
         AlertDialog(
@@ -457,7 +470,7 @@ private sealed interface Screen { data object Home : Screen; data class Diagram(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    vm.deleteFlow(flow) {
+                    vm.deleteFlow(currentFlow) {
                         showDeleteConfirmation = false
                         goBack()
                     }
@@ -476,6 +489,98 @@ private sealed interface Screen { data object Home : Screen; data class Diagram(
             Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(checked = dontShowAgain, onCheckedChange = { dontShowAgain = it }, modifier = Modifier.size(34.dp)); Spacer(Modifier.width(4.dp)); Text("Ok, got it. Don't show me this again.", color = Color(0xFF222222), fontSize = 13.sp) }
         }
     }, confirmButton = { TextButton(onClick = { onConfirm(dontShowAgain) }) { Text("OK", color = Color(0xFFE0C85B)) } })
+}
+
+/** Diagram label and appearance settings, opened by the editor gear button. */
+@Composable private fun DiagramSettingsDialog(
+    flow: FlowEntity,
+    onDismiss: () -> Unit,
+    onSave: (title: String, version: String, createdBy: String, showTitle: Boolean, showVersion: Boolean, showCreatedAt: Boolean, showCreatedBy: Boolean, showAppVersion: Boolean) -> Unit
+) {
+    var title by remember(flow.id) { mutableStateOf(flow.name) }
+    var version by remember(flow.id) { mutableStateOf(flow.diagramVersion) }
+    var createdBy by remember(flow.id) { mutableStateOf(flow.createdBy) }
+    var showTitle by remember(flow.id) { mutableStateOf(flow.showTitle) }
+    var showVersion by remember(flow.id) { mutableStateOf(flow.showVersion) }
+    var showCreatedAt by remember(flow.id) { mutableStateOf(flow.showCreatedAt) }
+    var showCreatedBy by remember(flow.id) { mutableStateOf(flow.showCreatedBy) }
+    var showAppVersion by remember(flow.id) { mutableStateOf(flow.showAppVersion) }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(.86f),
+            color = Color.White,
+            shape = RoundedCornerShape(4.dp)
+        ) {
+            Column(
+                Modifier.padding(horizontal = 20.dp, vertical = 22.dp).verticalScroll(rememberScrollState())
+            ) {
+                Text("DIAGRAM LABELS", color = Color(0xFF666666), fontSize = 22.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(5.dp))
+                Box(Modifier.fillMaxWidth().height(2.dp).background(Color(0xFFE5E5E5)))
+                Spacer(Modifier.height(18.dp))
+                EditableDiagramSetting("Title", title, { title = it }, showTitle, { showTitle = !showTitle })
+                EditableDiagramSetting("Diagram Version", version, { version = it }, showVersion, { showVersion = !showVersion })
+                ReadOnlyDiagramSetting("Created At", java.text.SimpleDateFormat("yyyy MMM dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(flow.createdAt)), showCreatedAt, { showCreatedAt = !showCreatedAt })
+                EditableDiagramSetting("Created By", createdBy, { createdBy = it }, showCreatedBy, { showCreatedBy = !showCreatedBy })
+                ReadOnlyDiagramSetting("App Version", "v1.0", showAppVersion, { showAppVersion = !showAppVersion })
+
+                Spacer(Modifier.height(6.dp))
+                Row(Modifier.align(Alignment.End), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = onDismiss) { Text("CANCEL", color = Color(0xFF647AA8)) }
+                    TextButton(onClick = { onSave(title, version, createdBy, showTitle, showVersion, showCreatedAt, showCreatedBy, showAppVersion) }) { Text("SAVE", color = Color(0xFF314A87), fontWeight = FontWeight.Bold) }
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun EditableDiagramSetting(label: String, value: String, onValueChange: (String) -> Unit, included: Boolean, toggleIncluded: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+        Column(Modifier.weight(1f)) {
+            Text(label, fontSize = 14.sp, color = Color(0xFF777777))
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange,
+                modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                singleLine = true
+            )
+        }
+        Spacer(Modifier.width(14.dp))
+        IncludedMark(included, toggleIncluded)
+    }
+    Spacer(Modifier.height(12.dp))
+}
+
+@Composable private fun ReadOnlyDiagramSetting(label: String, value: String, included: Boolean, toggleIncluded: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+        Column(Modifier.weight(1f)) {
+            Text(label, fontSize = 14.sp, color = Color(0xFF777777))
+            Text(value, modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 8.dp).border(BorderStroke(0.8.dp, Color(0xFFBDBDBD))), fontSize = 17.sp, color = Color(0xFF9A9A9A), maxLines = 1)
+        }
+        Spacer(Modifier.width(14.dp))
+        IncludedMark(included, toggleIncluded)
+    }
+    Spacer(Modifier.height(12.dp))
+}
+
+@Composable private fun IncludedMark(included: Boolean, onClick: (() -> Unit)? = null) {
+    Box(
+        Modifier.size(26.dp).background(if (included) Color(0xFFECDC78) else Color.Transparent, RoundedCornerShape(3.dp)).border(if (included) 0.dp else 2.dp, Color(0xFF777777), RoundedCornerShape(3.dp)).clickable(enabled = onClick != null) { onClick?.invoke() },
+        contentAlignment = Alignment.Center
+    ) { if (included) Text("✓", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold) }
+}
+
+@Composable private fun ProOnlySetting(symbol: String, label: String, value: String) {
+    // Disabled settings should still be legible and belong to the same visual
+    // palette as the rest of the editor, rather than fading into white.
+    // Use FlowSnap's blue palette even for unavailable controls.  A softened
+    // navy keeps the disabled state clear without looking washed out.
+    val disabledColor = Color(0xFF647AA8)
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(symbol, color = disabledColor, fontSize = 26.sp)
+        Spacer(Modifier.width(18.dp))
+        Column { Text(label, color = disabledColor, fontSize = 16.sp, fontWeight = FontWeight.Medium); Text(value, color = disabledColor, fontSize = 14.sp) }
+    }
 }
 
 @Composable private fun DragTapIllustration() = Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -499,7 +604,10 @@ private fun exportFlowPdf(
     transitions: List<TransitionEntity>,
     flow: FlowEntity
 ) {
-    runCatching {
+    // Bitmap decoding and PDF encoding are intentionally off the UI thread.
+    // A flow can contain many full-resolution screenshots.
+    Thread {
+        val result = runCatching {
         // PdfDocument is not a java.io.Closeable on every Android API stub,
         // so close it explicitly instead of Kotlin's use { } helper.
         val document = PdfDocument()
@@ -566,10 +674,31 @@ private fun exportFlowPdf(
         } finally {
             document.close()
         }
-    }.onSuccess {
-        android.widget.Toast.makeText(context, "PDF saved", android.widget.Toast.LENGTH_SHORT).show()
-    }.onFailure {
-        android.widget.Toast.makeText(context, "Could not save PDF", android.widget.Toast.LENGTH_SHORT).show()
+        }
+        val showResult: () -> Unit = {
+            result.onSuccess {
+                android.widget.Toast.makeText(context, "PDF saved", android.widget.Toast.LENGTH_SHORT).show()
+                openPdfPreview(context, destination)
+            }.onFailure { error ->
+                android.util.Log.e("FlowSnapPdf", "PDF export failed", error)
+                android.widget.Toast.makeText(context, "Could not save PDF: ${error.message ?: "unknown error"}", android.widget.Toast.LENGTH_LONG).show()
+            }
+            Unit
+        }
+        (context as? Activity)?.runOnUiThread(showResult) ?: android.os.Handler(android.os.Looper.getMainLooper()).post(showResult)
+    }.start()
+}
+
+/** Opens the SAF document URI after a successful export. It remains usable from Downloads. */
+private fun openPdfPreview(context: Context, uri: Uri) {
+    val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, "application/pdf")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    try {
+        context.startActivity(Intent.createChooser(viewIntent, "Open FlowSnap PDF"))
+    } catch (_: android.content.ActivityNotFoundException) {
+        android.widget.Toast.makeText(context, "PDF saved. Install a PDF viewer to open it.", android.widget.Toast.LENGTH_LONG).show()
     }
 }
 
@@ -583,49 +712,53 @@ private fun exportFlowPdf(
     screens: List<ScreenEntity>,
     transitions: List<TransitionEntity>,
     flow: FlowEntity,
-    modifier: Modifier = Modifier,
-    onOpenPreview: (() -> Unit)? = null
+    modifier: Modifier = Modifier
 ) {
     val bitmaps = remember(screens.map { it.imagePath }) {
         screens.associate { screen -> screen.id to android.graphics.BitmapFactory.decodeFile(screen.imagePath).asImageBitmap() }
     }
-    // A document page holds at most seven columns by four rows: 28 screens.
-    // Further screens are shown on another fixed-size page via the toggler.
-    val pages = remember(screens.map { it.id }) { screens.chunked(28) }
-    var selectedPage by remember(screens.map { it.id }) { mutableStateOf(0) }
-    val pageIndex = selectedPage.coerceIn(0, pages.lastIndex)
-    val pageScreens = pages[pageIndex]
-    val pageIds = pageScreens.mapTo(mutableSetOf()) { it.id }
-    val pageTransitions = transitions.filter {
-        it.fromScreenId in pageIds && it.toScreenId in pageIds
-    }
-    val cardModifier = if (onOpenPreview == null) modifier else modifier.clickable { onOpenPreview() }
+    // One scrollable document, with five screenshots per row. The outer
+    // editor owns scrolling; no diagram-page toggler is required.
+    val columns = minOf(5, screens.size.coerceAtLeast(1))
+    val rows = (screens.size + columns - 1) / columns
+    val canvasHeight = (rows * 132).dp
+    val contentScroll = rememberScrollState()
     Card(
-        modifier = cardModifier.clipToBounds(),
+        modifier = modifier,
         colors = CardDefaults.cardColors(containerColor = Color.White),
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
         Column(Modifier.padding(12.dp).fillMaxSize()) {
-            FlowDiagramCanvas(
-                screens = pageScreens,
-                transitions = pageTransitions,
-                bitmaps = bitmaps,
-                // The canvas gets the remaining fixed page space. It cannot
-                // paint or measure outside the page when the flow grows.
-                modifier = Modifier.fillMaxWidth().weight(1f).clipToBounds()
-            )
-            if (pages.size > 1) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(onClick = { selectedPage = (pageIndex - 1).coerceAtLeast(0) }, enabled = pageIndex > 0) { Text("‹") }
-                    Text("Page ${pageIndex + 1} / ${pages.size}", fontSize = 9.sp, color = Color(0xFF4D4D4D))
-                    TextButton(onClick = { selectedPage = (pageIndex + 1).coerceAtMost(pages.lastIndex) }, enabled = pageIndex < pages.lastIndex) { Text("›") }
+            // This viewport clips only the document body. The Card remains
+            // stationary and keeps its rounded outline while the user scrolls.
+            Box(Modifier.fillMaxWidth().weight(1f).clipToBounds()) {
+                Box(Modifier.fillMaxSize().verticalScroll(contentScroll)) {
+                    FlowDiagramCanvas(
+                        screens = screens,
+                        transitions = transitions,
+                        bitmaps = bitmaps,
+                        modifier = Modifier.fillMaxWidth().height(canvasHeight)
+                    )
                 }
             }
-            Spacer(Modifier.height(8.dp)); Row(Modifier.fillMaxWidth().background(Color(0xFFF8F8F8)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) { Column { Text("Title", fontSize = 9.sp, color = Color.Gray); Text(flow.name, fontSize = 12.sp) }; Column { Text("Version", fontSize = 9.sp, color = Color.Gray); Text("v1.0", fontSize = 12.sp) }; Column { Text("Created by", fontSize = 9.sp, color = Color.Gray); Text("You", fontSize = 12.sp) } }
+            val metadata = buildList {
+                if (flow.showTitle) add("Title" to flow.name)
+                if (flow.showVersion) add("Version" to flow.diagramVersion)
+                if (flow.showCreatedAt) add("Created at" to java.text.SimpleDateFormat("yyyy MMM dd", java.util.Locale.getDefault()).format(java.util.Date(flow.createdAt)))
+                if (flow.showCreatedBy) add("Created by" to flow.createdBy)
+                if (flow.showAppVersion) add("App version" to "v1.0")
+            }
+            if (metadata.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth().background(Color(0xFFF8F8F8)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    metadata.forEach { (label, value) ->
+                        Column(Modifier.weight(1f, fill = false)) {
+                            Text(label, fontSize = 9.sp, color = Color.Gray)
+                            Text(value, fontSize = 12.sp, maxLines = 1)
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -643,12 +776,10 @@ private fun exportFlowPdf(
     val gap = 8.dp.toPx()
     val rowGap = 12.dp.toPx()
     val aspectRatio = 2.15f
-    // Select the widest thumbnail layout that still fits every captured
-    // screenshot inside this fixed-size diagram page (up to seven per row).
-    // This is deliberately not a "best fit" choice. The product rule is
-    // exactly seven nodes per row whenever seven or more screenshots exist.
-    // With paging at 28 nodes, this also guarantees no more than four rows.
-    val columns = minOf(7, screens.size)
+    // Five columns match the vertically scrolling reference layout. Rows are
+    // added below, rather than shrinking a whole diagram page or creating a
+    // second page.
+    val columns = minOf(5, screens.size)
     val rows = (screens.size + columns - 1) / columns
     val widthBound = (size.width - margin * 2 - gap * (columns - 1)) / columns
     val heightBound = (size.height - margin * 2 - rowGap * (rows - 1)) / (rows * aspectRatio)

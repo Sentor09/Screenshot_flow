@@ -14,7 +14,19 @@ import androidx.room.RoomDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "flows")
-data class FlowEntity(@PrimaryKey val id: String, val name: String, val createdAt: Long, val updatedAt: Long)
+data class FlowEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val diagramVersion: String = "v1.0",
+    val createdBy: String = "You",
+    val showTitle: Boolean = true,
+    val showVersion: Boolean = true,
+    val showCreatedAt: Boolean = true,
+    val showCreatedBy: Boolean = true,
+    val showAppVersion: Boolean = false
+)
 
 @Entity(tableName = "screens")
 data class ScreenEntity(
@@ -42,6 +54,7 @@ data class TransitionEntity(
 
 @Dao interface FlowDao {
     @Query("SELECT * FROM flows ORDER BY updatedAt DESC") fun observeAll(): Flow<List<FlowEntity>>
+    @Query("SELECT * FROM flows WHERE id = :flowId LIMIT 1") fun observeFlow(flowId: String): Flow<FlowEntity?>
     @Query("SELECT * FROM flows WHERE id = :flowId LIMIT 1") suspend fun flow(flowId: String): FlowEntity?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsert(flow: FlowEntity)
     @Query("SELECT * FROM screens WHERE flowId = :flowId ORDER BY position") fun observeScreens(flowId: String): Flow<List<ScreenEntity>>
@@ -57,7 +70,7 @@ data class TransitionEntity(
     @Query("DELETE FROM flows WHERE id = :flowId") suspend fun deleteFlow(flowId: String)
 }
 
-@Database(entities = [FlowEntity::class, ScreenEntity::class, TransitionEntity::class], version = 4, exportSchema = false)
+@Database(entities = [FlowEntity::class, ScreenEntity::class, TransitionEntity::class], version = 6, exportSchema = false)
 abstract class FlowDatabase : RoomDatabase() { abstract fun flowDao(): FlowDao
     companion object { fun create(context: Context) = Room.databaseBuilder(context, FlowDatabase::class.java, "flowsnap.db").fallbackToDestructiveMigration().build() }
 }
