@@ -4,12 +4,15 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.app.ActivityOptions
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -20,26 +23,39 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.res.ResourcesCompat
-import com.flowsnap.MainActivity
 import com.flowsnap.R
 import com.flowsnap.data.ScreenshotStorage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.FileOutputStream
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Owns exactly one user-approved MediaProjection session and its draggable capture control. */
 class CaptureService : Service() {
     private lateinit var projection: MediaProjection
     private lateinit var reader: ImageReader
+    private var virtualDisplay: VirtualDisplay? = null
     private lateinit var windowManager: WindowManager
     private var bubble: View? = null
     private var flowId = ""
     private var sessionStarted = false
     private var captureRequested = false
+    private val stopping = AtomicBoolean(false)
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val captureScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var saveJob: Job? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) { stopCapture(); return START_NOT_STICKY }
@@ -55,6 +71,7 @@ class CaptureService : Service() {
         }
         // A foreground service may receive repeated start requests; one projection gets one overlay.
         if (sessionStarted) return START_NOT_STICKY
+        stopping.set(false)
         sessionStarted = true
         flowId = intent?.getStringExtra(EXTRA_FLOW_ID).orEmpty()
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
@@ -65,7 +82,7 @@ class CaptureService : Service() {
         projection.registerCallback(object : MediaProjection.Callback() { override fun onStop() = stopCapture() }, null)
         val metrics = resources.displayMetrics
         reader = ImageReader.newInstance(metrics.widthPixels, metrics.heightPixels, PixelFormat.RGBA_8888, 2)
-        projection.createVirtualDisplay("FlowSnap capture", metrics.widthPixels, metrics.heightPixels, metrics.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null)
+        virtualDisplay = projection.createVirtualDisplay("FlowSnap capture", metrics.widthPixels, metrics.heightPixels, metrics.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null)
         if (Settings.canDrawOverlays(this)) {
             showBubble()
             // Put FlowSnap in the background after its overlay has been attached.
@@ -84,15 +101,49 @@ class CaptureService : Service() {
 
     private fun showBubble() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val params = WindowManager.LayoutParams(128, 128, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.START; x = 48; y = 180 }
+        // WindowManager dimensions are pixels, unlike Compose dp. Convert the
+        // visual spec explicitly so text has the same breathing room on every
+        // screen density.
+        val density = resources.displayMetrics.density
+        val widgetSize = (60 * density).toInt()
+        val innerInset = (5 * density).toInt()
+        val params = WindowManager.LayoutParams(
+            widgetSize,
+            widgetSize,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            // Use START so x is always a normal left-origin screen coordinate.
+            // END gravity reverses x semantics and made dragging appear stuck.
+            gravity = Gravity.TOP or Gravity.START
+            // Start every new capture session at the left edge. The drag listener
+            // still permits the full 0..right-edge range after it is shown.
+            x = (16 * density).toInt()
+            y = (160 * density).toInt()
+        }
         bubble?.let { runCatching { windowManager.removeView(it) } }
+        val outerRing = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(android.graphics.Color.WHITE)
+            setStroke(density.toInt().coerceAtLeast(1), android.graphics.Color.rgb(36, 81, 155))
+        }
+        val blueCenter = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(android.graphics.Color.rgb(36, 81, 155))
+        }
         bubble = TextView(this).apply {
-            text = "●\nCAPTURE"
-            textSize = 11f
+            text = "Drag\n& tap"
+            textSize = 8f
             gravity = Gravity.CENTER
-            typeface = ResourcesCompat.getFont(this@CaptureService, R.font.urbanist_medium)
+            textAlignment = View.TEXT_ALIGNMENT_CENTER
+            typeface = Typeface.create(ResourcesCompat.getFont(this@CaptureService, R.font.urbanist_medium), Typeface.BOLD)
             setTextColor(android.graphics.Color.WHITE)
-            setBackgroundColor(android.graphics.Color.rgb(38, 78, 150))
+            includeFontPadding = false
+            setLineSpacing(0f, 0.9f)
+            background = LayerDrawable(arrayOf(outerRing, blueCenter)).apply {
+                setLayerInset(1, innerInset, innerInset, innerInset, innerInset)
+            }
             elevation = 12f
             setOnTouchListener(DragCaptureListener(params))
         }
@@ -100,7 +151,7 @@ class CaptureService : Service() {
     }
 
     private fun openSystemHome() {
-        Handler(Looper.getMainLooper()).post {
+        mainHandler.post {
             startActivity(
                 Intent(Intent.ACTION_MAIN)
                     .addCategory(Intent.CATEGORY_HOME)
@@ -110,11 +161,31 @@ class CaptureService : Service() {
     }
 
     private inner class DragCaptureListener(private val params: WindowManager.LayoutParams) : View.OnTouchListener {
+        private val touchSlop = ViewConfiguration.get(this@CaptureService).scaledTouchSlop
         private var downX = 0f; private var downY = 0f; private var initialX = 0; private var initialY = 0
         override fun onTouch(v: View, event: MotionEvent): Boolean = when (event.action) {
-            MotionEvent.ACTION_DOWN -> { downX = event.rawX; downY = event.rawY; initialX = params.x; initialY = params.y; true }
-            MotionEvent.ACTION_MOVE -> { params.x = initialX + (event.rawX - downX).toInt(); params.y = initialY + (event.rawY - downY).toInt(); windowManager.updateViewLayout(v, params); true }
-            MotionEvent.ACTION_UP -> { if (kotlin.math.abs(event.rawX - downX) < 12 && kotlin.math.abs(event.rawY - downY) < 12) capture(params); true }
+            MotionEvent.ACTION_DOWN -> {
+                val centerX = v.width / 2f
+                val centerY = v.height / 2f
+                val radius = minOf(v.width, v.height) / 2f
+                val distanceX = event.x - centerX
+                val distanceY = event.y - centerY
+                if (distanceX * distanceX + distanceY * distanceY > radius * radius) {
+                    false
+                } else {
+                    downX = event.rawX; downY = event.rawY; initialX = params.x; initialY = params.y; true
+                }
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val display = resources.displayMetrics
+                val maxX = (display.widthPixels - v.width).coerceAtLeast(0)
+                val maxY = (display.heightPixels - v.height).coerceAtLeast(0)
+                params.x = (initialX + (event.rawX - downX).toInt()).coerceIn(0, maxX)
+                params.y = (initialY + (event.rawY - downY).toInt()).coerceIn(0, maxY)
+                windowManager.updateViewLayout(v, params)
+                true
+            }
+            MotionEvent.ACTION_UP -> { if (kotlin.math.abs(event.rawX - downX) < touchSlop && kotlin.math.abs(event.rawY - downY) < touchSlop) capture(params); true }
             else -> false
         }
     }
@@ -130,65 +201,94 @@ class CaptureService : Service() {
             // transition; removing it here can cause the review activity launch
             // to be silently blocked. Alpha zero keeps FlowSnap out of the bitmap.
             bubble?.alpha = 0f
-            Handler(Looper.getMainLooper()).postDelayed({ capture(params, 1) }, 180)
+            mainHandler.postDelayed({ capture(params, 1) }, 180)
             return
         }
         val image = reader.acquireLatestImage()
         if (image == null) {
-            if (attempt < 8) { Handler(Looper.getMainLooper()).postDelayed({ capture(params, attempt + 1) }, 100); return }
+            if (attempt < 8) { mainHandler.postDelayed({ capture(params, attempt + 1) }, 100); return }
             captureRequested = false; Toast.makeText(this, "Capture not ready. Try again.", Toast.LENGTH_SHORT).show(); return
         }
-        val plane = image.planes[0]; val width = image.width; val height = image.height; val rowPadding = plane.rowStride - plane.pixelStride * width
-        val bitmap = Bitmap.createBitmap(width + rowPadding / plane.pixelStride, height, Bitmap.Config.ARGB_8888)
-        bitmap.copyPixelsFromBuffer(plane.buffer); image.close()
-        // Store the full-quality PNG in FlowSnap's app-private internal
-        // storage. Room records this file path when the user keeps it.
-        val output = ScreenshotStorage.newCaptureFile(this, flowId)
-        FileOutputStream(output).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }; bitmap.recycle()
-        openReview(output.absolutePath, (params.x + 64f) / resources.displayMetrics.widthPixels, (params.y + 64f) / resources.displayMetrics.heightPixels)
+        val markerX = (params.x + params.width / 2f) / resources.displayMetrics.widthPixels
+        val markerY = (params.y + params.height / 2f) / resources.displayMetrics.heightPixels
+        // Copying a full display bitmap and PNG encoding are expensive. Keep the
+        // service main thread free so FlowSnap remains responsive during capture.
+        val imageClosed = AtomicBoolean(false)
+        saveJob = captureScope.launch {
+            val result = runCatching { saveCaptureImage(image, imageClosed) }
+            withContext(Dispatchers.Main.immediate) {
+                result.onSuccess { path ->
+                    openReview(path, markerX, markerY)
+                }.onFailure {
+                    captureRequested = false
+                    bubble?.alpha = 1f
+                    Toast.makeText(this@CaptureService, "Could not save screenshot. Try again.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        // If the service is stopped before this coroutine begins, release the
+        // acquired ImageReader frame rather than keeping one of its two slots.
+        saveJob?.invokeOnCompletion {
+            if (imageClosed.compareAndSet(false, true)) runCatching { image.close() }
+        }
+    }
+
+    /** Converts one ImageReader frame into an app-private PNG on Dispatchers.IO. */
+    private fun saveCaptureImage(image: android.media.Image, imageClosed: AtomicBoolean): String {
+        var paddedBitmap: Bitmap? = null
+        var bitmap: Bitmap? = null
+        try {
+            val plane = image.planes[0]
+            val width = image.width
+            val height = image.height
+            val rowPadding = plane.rowStride - plane.pixelStride * width
+            val padded = Bitmap.createBitmap(
+                width + rowPadding / plane.pixelStride,
+                height,
+                Bitmap.Config.ARGB_8888
+            )
+            paddedBitmap = padded
+            padded.copyPixelsFromBuffer(plane.buffer)
+            val captureBitmap = if (padded.width == width) {
+                padded
+            } else {
+                Bitmap.createBitmap(padded, 0, 0, width, height)
+            }
+            bitmap = captureBitmap
+            val output = ScreenshotStorage.newCaptureFile(this, flowId)
+            try {
+                FileOutputStream(output).use { stream ->
+                    check(captureBitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
+                        "PNG encoding failed"
+                    }
+                }
+            } catch (error: Throwable) {
+                output.delete()
+                throw error
+            }
+            return output.absolutePath
+        } finally {
+            if (imageClosed.compareAndSet(false, true)) image.close()
+            bitmap?.takeIf { !it.isRecycled }?.recycle()
+            paddedBitmap?.takeIf { it !== bitmap && !it.isRecycled }?.recycle()
+        }
     }
 
     private fun openReview(path: String?, markerX: Float, markerY: Float) {
-        val reviewIntent = Intent(this, MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        // Delivery is decoupled from UI navigation: the activity owns routing the capture-ready event.
+        sendBroadcast(Intent(ACTION_CAPTURE_READY)
+            .setPackage(packageName)
             .putExtra(EXTRA_FLOW_ID, flowId)
             .putExtra(EXTRA_PATH, path)
             .putExtra(EXTRA_MARKER_X, markerX)
-            .putExtra(EXTRA_MARKER_Y, markerY)
-
-        // Route the user-initiated overlay tap through a PendingIntent with the
-        // Android 14+ background-activity-launch opt-in. This keeps the review
-        // screen reliable when FlowSnap is behind Home or another app.
-        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        val creatorOptions = if (android.os.Build.VERSION.SDK_INT >= 35) {
-            ActivityOptions.makeBasic().apply {
-                setPendingIntentCreatorBackgroundActivityStartMode(
-                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
-                )
-            }.toBundle()
-        } else null
-        val reviewPendingIntent = PendingIntent.getActivity(this, REVIEW_REQUEST_CODE, reviewIntent, flags, creatorOptions)
-        runCatching {
-            if (android.os.Build.VERSION.SDK_INT >= 34) {
-                val sendOptions = ActivityOptions.makeBasic().apply {
-                    pendingIntentBackgroundActivityStartMode = ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
-                }
-                reviewPendingIntent.send(this, 0, null, null, null, null, sendOptions.toBundle())
-            } else {
-                reviewPendingIntent.send()
-            }
-        }.onFailure {
-            // Keep the old direct launch as a fallback for vendor builds that
-            // reject BAL options despite an active overlay window.
-            startActivity(reviewIntent)
-        }
+            .putExtra(EXTRA_MARKER_Y, markerY))
         // The transparent anchor is no longer needed after the launch request.
         // Keep a reference to the *old* overlay.  A user can press Keep + Next
         // before this delayed callback runs; in that case ACTION_RESUME has
         // already created a new button.  Removing the mutable `bubble` field
         // here used to remove that new button, leaving the next capture stuck.
         val reviewBubble = bubble
-        Handler(Looper.getMainLooper()).postDelayed({
+        mainHandler.postDelayed({
             if (bubble === reviewBubble) {
                 reviewBubble?.let { runCatching { windowManager.removeView(it) } }
                 bubble = null
@@ -196,7 +296,27 @@ class CaptureService : Service() {
         }, 500)
     }
 
-    private fun stopCapture() { bubble?.let { runCatching { windowManager.removeView(it) } }; bubble = null; sessionStarted = false; captureRequested = false; runCatching { reader.close() }; runCatching { projection.stop() }; stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
+    private fun stopCapture() {
+        if (!stopping.compareAndSet(false, true)) return
+        mainHandler.removeCallbacksAndMessages(null)
+        saveJob?.cancel()
+        saveJob = null
+        bubble?.let { runCatching { windowManager.removeView(it) } }
+        bubble = null
+        sessionStarted = false
+        captureRequested = false
+        runCatching { virtualDisplay?.release() }
+        virtualDisplay = null
+        runCatching { reader.close() }
+        runCatching { projection.stop() }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+    override fun onDestroy() {
+        stopCapture()
+        captureScope.cancel()
+        super.onDestroy()
+    }
     override fun onBind(intent: Intent?): IBinder? = null
-    companion object { const val CHANNEL_ID = "capture"; const val ACTION_STOP = "com.flowsnap.STOP"; const val ACTION_RESUME = "com.flowsnap.RESUME"; const val EXTRA_FLOW_ID = "flowId"; const val EXTRA_RESULT_CODE = "resultCode"; const val EXTRA_RESULT_DATA = "resultData"; const val EXTRA_PATH = "path"; const val EXTRA_MARKER_X = "markerX"; const val EXTRA_MARKER_Y = "markerY"; private const val REVIEW_REQUEST_CODE = 92 }
+    companion object { const val CHANNEL_ID = "capture"; const val ACTION_STOP = "com.flowsnap.STOP"; const val ACTION_RESUME = "com.flowsnap.RESUME"; const val ACTION_CAPTURE_READY = "com.flowsnap.CAPTURE_READY"; const val EXTRA_FLOW_ID = "flowId"; const val EXTRA_RESULT_CODE = "resultCode"; const val EXTRA_RESULT_DATA = "resultData"; const val EXTRA_PATH = "path"; const val EXTRA_MARKER_X = "markerX"; const val EXTRA_MARKER_Y = "markerY" }
 }
