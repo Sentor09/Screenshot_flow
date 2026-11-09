@@ -12,6 +12,7 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.Update
 import androidx.room.Transaction
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
@@ -36,7 +37,8 @@ interface FlowDao {
     @Query("SELECT * FROM flows ORDER BY updatedAt DESC") fun observeAll(): Flow<List<FlowEntity>>
     @Query("SELECT * FROM flows WHERE id = :flowId LIMIT 1") fun observeFlow(flowId: String): Flow<FlowEntity?>
     @Query("SELECT * FROM flows WHERE id = :flowId LIMIT 1") suspend fun flow(flowId: String): FlowEntity?
-    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsert(flow: FlowEntity)
+    @Insert(onConflict = OnConflictStrategy.ABORT) suspend fun insertFlow(flow: FlowEntity)
+    @Update suspend fun updateFlow(flow: FlowEntity)
     @Query("SELECT * FROM screens WHERE flowId = :flowId ORDER BY position") fun observeScreens(flowId: String): Flow<List<ScreenEntity>>
     @Query("SELECT * FROM screens WHERE flowId = :flowId ORDER BY position") suspend fun screensForFlow(flowId: String): List<ScreenEntity>
     @Query("SELECT imagePath FROM screens") suspend fun referencedImagePaths(): List<String>

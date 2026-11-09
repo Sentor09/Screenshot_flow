@@ -216,7 +216,7 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
     // Keep the gallery query alive for the app lifetime. This prevents a
     // transient empty Home grid when returning from a completed capture.
     val flows = dao.observeAll().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
-    fun createFlow(open: (FlowEntity) -> Unit) = viewModelScope.launch { val now = System.currentTimeMillis(); val flow = FlowEntity(UUID.randomUUID().toString(), "My new app flow", now, now); dao.upsert(flow); open(flow) }
+    fun createFlow(open: (FlowEntity) -> Unit) = viewModelScope.launch { val now = System.currentTimeMillis(); val flow = FlowEntity(UUID.randomUUID().toString(), "My new app flow", now, now); dao.insertFlow(flow); open(flow) }
     fun updateFlowMetadata(
         flow: FlowEntity,
         title: String,
@@ -240,7 +240,7 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
             showAppVersion = showAppVersion,
             updatedAt = System.currentTimeMillis()
         )
-        dao.upsert(updated)
+        dao.updateFlow(updated)
         onSaved(updated)
     }
     fun updateDiagramAppearance(
@@ -254,7 +254,7 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
             connectorColor = connectorColor,
             updatedAt = System.currentTimeMillis()
         )
-        dao.upsert(updated)
+        dao.updateFlow(updated)
         onSaved(updated)
     }
     private suspend fun persistCapture(review: CaptureReview) = dao.persistCapture(
