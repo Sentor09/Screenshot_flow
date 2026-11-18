@@ -3,6 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.kapt")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("androidx.room")
 }
 
 android { namespace = "com.flowsnap"; compileSdk = 35
@@ -16,6 +17,10 @@ android { namespace = "com.flowsnap"; compileSdk = 35
 }
 
 kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
+
+room {
+    schemaDirectory("$projectDir/schemas")
+}
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")

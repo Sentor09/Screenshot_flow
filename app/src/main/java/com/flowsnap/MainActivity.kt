@@ -38,6 +38,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -59,6 +60,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Home
@@ -237,7 +239,22 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
     // Keep the gallery query alive for the app lifetime. This prevents a
     // transient empty Home grid when returning from a completed capture.
     val flows = dao.observeAll().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
-    fun createFlow(open: (FlowEntity) -> Unit) = viewModelScope.launch { val now = System.currentTimeMillis(); val flow = FlowEntity(UUID.randomUUID().toString(), "My new app flow", now, now); dao.insertFlow(flow); open(flow) }
+    fun createFlow(open: (FlowEntity) -> Unit) = viewModelScope.launch {
+        val preferences = getApplication<android.app.Application>()
+            .getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        val flow = FlowEntity(
+            id = UUID.randomUUID().toString(),
+            name = preferences.getString(PREF_DEFAULT_FLOW_NAME, "My new app flow")
+                ?.trim().orEmpty().ifBlank { "My new app flow" },
+            createdAt = now,
+            updatedAt = now,
+            showMobileStencils = true,
+            connectorColor = preferences.getLong(PREF_CONNECTOR_COLOR, 0xFF69B83AL)
+        )
+        dao.insertFlow(flow)
+        open(flow)
+    }
     fun updateFlowMetadata(
         flow: FlowEntity,
         title: String,
@@ -354,16 +371,23 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
 
 }
 
+private const val APP_SETTINGS = "flowsnap_settings"
+private const val PREF_DEFAULT_FLOW_NAME = "default_flow_name"
+private const val PREF_CONNECTOR_COLOR = "connector_color"
+
 @Composable private fun FlowSnapApp(review: CaptureReview?, dismissReview: () -> Unit, vm: FlowViewModel = viewModel()) {
     Box(Modifier.fillMaxSize().background(Color.White)) {
         var selectedFlowId by rememberSaveable { mutableStateOf<String?>(null) }
+        var settingsOpen by rememberSaveable { mutableStateOf(false) }
         var lightboxOpen by remember { mutableStateOf(false) }
         androidx.compose.runtime.LaunchedEffect(review?.path) { vm.cleanupOrphanedCaptures(review?.path) }
         if (review != null) CaptureReviewScreen(review, vm, dismissReview, onFinish = { savedFlow ->
             if (savedFlow != null) selectedFlowId = savedFlow.id
             dismissReview()
-        }) else if (selectedFlowId == null) {
-            HomeScreen(vm) { selectedFlowId = it.id }
+        }) else if (settingsOpen) {
+            AppSettingsScreen(close = { settingsOpen = false })
+        } else if (selectedFlowId == null) {
+            HomeScreen(vm, openSettings = { settingsOpen = true }) { selectedFlowId = it.id }
         } else {
             // The preceding null branch guarantees this route has an id.
             val flowId = requireNotNull(selectedFlowId)
@@ -389,7 +413,11 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
     }
 }
 
-@Composable private fun HomeScreen(vm: FlowViewModel, openFlow: (FlowEntity) -> Unit) {
+@Composable private fun HomeScreen(
+    vm: FlowViewModel,
+    openSettings: () -> Unit,
+    openFlow: (FlowEntity) -> Unit
+) {
     val flows by vm.flows.collectAsStateWithLifecycle()
     // Keep gallery cards above the Android gesture/three-button navigation area.
     Column(Modifier.fillMaxSize().background(Color(0xFFF5F5F5)).windowInsetsPadding(WindowInsets.systemBars)) {
@@ -407,7 +435,9 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
                 .padding(horizontal = 18.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Default.Menu, "Menu", Modifier.size(28.dp), tint = Color(0xFF656565))
+            Box(Modifier.size(44.dp).clip(CircleShape).clickable(onClick = openSettings), contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.Menu, contentDescription = "Settings", modifier = Modifier.size(28.dp), tint = Color(0xFF656565))
+            }
             Spacer(Modifier.width(20.dp))
             Text("Flow", color = Color(0xFF312E81), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Light, maxLines = 1)
             Text("Snap", color = Color(0xFF4F46E5), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Light, maxLines = 1)
@@ -429,6 +459,170 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
                 FlowTile(flow, vm) { openFlow(flow) }
             }
         }
+    }
+}
+
+@Composable private fun AppSettingsScreen(close: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val preferences = remember { context.getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE) }
+    var defaultFlowName by remember { mutableStateOf(preferences.getString(PREF_DEFAULT_FLOW_NAME, "My new app flow").orEmpty()) }
+    var connectorColor by remember { mutableLongStateOf(preferences.getLong(PREF_CONNECTOR_COLOR, 0xFF69B83AL)) }
+    var showColorPicker by remember { mutableStateOf(false) }
+    val colorOptions = listOf(
+        0xFF69B83AL to "Green", 0xFF4F46E5L to "Indigo", 0xFFE05252L to "Red",
+        0xFFF39C12L to "Orange", 0xFF00A6A6L to "Teal", 0xFF8E44ADL to "Purple"
+    )
+    val primaryBlue = Color(0xFF4F46E5)
+
+    Column(
+        Modifier.fillMaxSize().background(Color(0xFFF5F6FA)).windowInsetsPadding(WindowInsets.systemBars)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().height(64.dp).background(Color.White).padding(horizontal = 18.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier.size(44.dp).clip(CircleShape).clickable(onClick = close),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = Color(0xFF312E81),
+                    modifier = Modifier.size(26.dp)
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Text("Settings", style = MaterialTheme.typography.titleLarge, color = Color(0xFF1F2D43), fontWeight = FontWeight.SemiBold)
+        }
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            SettingsSectionLabel("NEW DIAGRAM DEFAULTS")
+            SettingsCard {
+                Text("Default flow name", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF202B3B))
+                Spacer(Modifier.height(10.dp))
+                CompositionLocalProvider(
+                    LocalTextSelectionColors provides TextSelectionColors(
+                        handleColor = primaryBlue,
+                        backgroundColor = primaryBlue.copy(alpha = .28f)
+                    )
+                ) {
+                    BasicTextField(
+                        value = defaultFlowName,
+                        onValueChange = { defaultFlowName = it },
+                        singleLine = true,
+                        cursorBrush = SolidColor(primaryBlue),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 15.sp, color = Color(0xFF202B3B)),
+                        modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFFD7DEEA), RoundedCornerShape(10.dp)).padding(horizontal = 14.dp, vertical = 12.dp)
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                SettingsActionRow(
+                    title = "Default connector color",
+                    trailing = { Box(Modifier.size(24.dp).background(Color(connectorColor.toInt()), CircleShape).border(1.dp, Color(0x22000000), CircleShape)) },
+                    onClick = { showColorPicker = true }
+                )
+            }
+
+            SettingsSectionLabel("ABOUT")
+            SettingsCard {
+                SettingsActionRow("FlowSnap", trailing = { Text("Version 1.0", fontSize = 13.sp, color = Color(0xFF718096)) })
+            }
+
+            Button(
+                onClick = {
+                    preferences.edit {
+                        putString(PREF_DEFAULT_FLOW_NAME, defaultFlowName.trim().ifBlank { "My new app flow" })
+                        putLong(PREF_CONNECTOR_COLOR, connectorColor)
+                    }
+                    android.widget.Toast.makeText(context, "Settings saved", android.widget.Toast.LENGTH_SHORT).show()
+                },
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = primaryBlue)
+            ) { Text("SAVE CHANGES", fontWeight = FontWeight.Bold) }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+    if (showColorPicker) {
+        Dialog(
+            onDismissRequest = { showColorPicker = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(.86f),
+                color = Color.White,
+                shape = RoundedCornerShape(28.dp),
+                shadowElevation = 18.dp
+            ) {
+                Column(Modifier.padding(horizontal = 24.dp, vertical = 22.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Connector color", modifier = Modifier.weight(1f), fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF202B3B))
+                        Box(
+                            Modifier.size(36.dp).background(Color(0xFFF1F3F8), CircleShape).clickable { showColorPicker = false },
+                            contentAlignment = Alignment.Center
+                        ) { Icon(Icons.Default.Close, contentDescription = "Close color picker", tint = Color(0xFF526177), modifier = Modifier.size(20.dp)) }
+                    }
+                    Spacer(Modifier.height(18.dp))
+                    colorOptions.chunked(3).forEachIndexed { rowIndex, row ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                            row.forEach { (color, _) ->
+                                Box(
+                                    Modifier.weight(1f).height(62.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Box(
+                                        Modifier.size(50.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(color.toInt()), CircleShape)
+                                            .border(if (color == connectorColor) 4.dp else 0.dp, if (color == connectorColor) Color(0xFF1F2D43) else Color.Transparent, CircleShape)
+                                            .clickable { connectorColor = color },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (color == connectorColor) Icon(Icons.Default.Check, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(25.dp))
+                                    }
+                                }
+                            }
+                        }
+                        if (rowIndex == 0) Spacer(Modifier.height(10.dp))
+                    }
+                    Spacer(Modifier.height(20.dp))
+                    Button(
+                        onClick = { showColorPicker = false },
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = primaryBlue)
+                    ) { Text("DONE", fontWeight = FontWeight.Bold) }
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun SettingsSectionLabel(label: String) {
+    Text(label, color = Color(0xFF64748B), fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = .8.sp, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
+}
+
+@Composable private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
+    Surface(color = Color.White, shape = RoundedCornerShape(18.dp), shadowElevation = 2.dp) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), content = content)
+    }
+}
+
+@Composable private fun SettingsActionRow(title: String, trailing: @Composable () -> Unit, onClick: (() -> Unit)? = null) {
+    val action = onClick
+    val interactionSource = remember { MutableInteractionSource() }
+    val rowModifier = Modifier.fillMaxWidth().let { modifier ->
+        if (action == null) modifier else modifier.clickable(interactionSource = interactionSource, indication = null, onClick = action)
+    }.padding(vertical = 4.dp)
+    Row(rowModifier, verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF202B3B))
+        }
+        Spacer(Modifier.width(10.dp))
+        trailing()
     }
 }
 
@@ -496,7 +690,7 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
             }
             Text(
                 flow.name,
-                modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
                 color = Color(0xFF312E81),
                 fontSize = 15.sp,
                 lineHeight = 18.sp,
@@ -504,7 +698,7 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
-            Text("Updated ${java.text.SimpleDateFormat("MMM d", java.util.Locale.getDefault()).format(java.util.Date(flow.updatedAt))}", Modifier.padding(top = 3.dp), color = Color(0xFF7B8798), fontSize = 10.sp)
+            Text("Updated ${java.text.SimpleDateFormat("MMM d", java.util.Locale.getDefault()).format(java.util.Date(flow.updatedAt))}", Modifier.padding(top = 0.dp), color = Color(0xFF7B8798), fontSize = 10.sp)
         }
     }
 }
@@ -1061,7 +1255,7 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
     val primaryBlue = Color(0xFF4F46E5)
     var selected by remember { mutableStateOf("JPEG") }
     val formats = listOf(
-        "JPEG" to "Static uneditable JPEG (Joint Photographic Experts Group) image",
+        "JPEG" to "High-quality image for sharing and viewing.",
         "PNG" to "Portable Network Graphics image",
         "PDF" to "Portable Document Format",
         "SVG / FIGMA (.svg)" to "Editable SVG for Figma."
@@ -2403,7 +2597,7 @@ private fun openPdfPreview(context: Context, uri: Uri) {
 @Composable private fun EditorCircle(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, large: Boolean = false, enabled: Boolean = true) {
     val size = if (large) 74.dp else 48.dp
     val tint = if (enabled) Color(0xFF4F46E5) else Color(0xFFB8B8B8)
-    Surface(modifier = modifier.size(size), shape = CircleShape, color = Color.Transparent, border = BorderStroke(if (large) 3.dp else 2.dp, tint)) { Box(Modifier.fillMaxSize().clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) { Icon(icon, label, tint = tint, modifier = Modifier.size(if (large) 42.dp else 27.dp)) } }
+    Surface(modifier = modifier.size(size), shape = CircleShape, color = Color.Transparent, border = BorderStroke(if (large) 3.dp else 2.dp, tint)) { Box(Modifier.fillMaxSize().clip(CircleShape).clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) { Icon(icon, label, tint = tint, modifier = Modifier.size(if (large) 42.dp else 27.dp)) } }
 }
 
 @Composable private fun DiagramPreview(
@@ -2538,6 +2732,8 @@ private fun openPdfPreview(context: Context, uri: Uri) {
     val requestClose = {
         if (!closeRequested) closeRequested = true
     }
+    val backdropInteractionSource = remember { MutableInteractionSource() }
+    val consumeTapInteractionSource = remember { MutableInteractionSource() }
     androidx.compose.runtime.LaunchedEffect(Unit) { visible = true }
     androidx.compose.runtime.LaunchedEffect(closeRequested) {
         if (closeRequested) {
@@ -2580,7 +2776,7 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                 .fillMaxSize()
                 .graphicsLayer(alpha = backdropAlpha)
                 .background(Color(0xCC05070B))
-                .clickable(onClick = requestClose),
+                .clickable(interactionSource = backdropInteractionSource, indication = null, onClick = requestClose),
             contentAlignment = Alignment.Center
         ) {
             // The preview owns the top system-bar area while it is open.
@@ -2598,7 +2794,7 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                     .fillMaxHeight(.64f)
                     .offset(y = (-63).dp)
                     .graphicsLayer(scaleX = imageScale, scaleY = imageScale)
-                    .clickable(onClick = {}),
+                    .clickable(interactionSource = consumeTapInteractionSource, indication = null, onClick = {}),
                 color = Color.Black,
                 shape = RoundedCornerShape(20.dp),
                 border = BorderStroke(1.dp, Color.White.copy(alpha = .12f)),
@@ -2700,6 +2896,7 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                         .align(Alignment.TopEnd)
                         .padding(top = 25.dp, end = 20.dp)
                         .size(48.dp)
+                        .clip(CircleShape)
                         .clickable(onClick = requestClose),
                     shape = CircleShape,
                     color = Color(0xE61A1A1A),
@@ -2739,7 +2936,7 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                     .fillMaxWidth(.84f)
                     .height(84.dp)
                     .offset(y = (-72).dp)
-                    .clickable(onClick = {}),
+                    .clickable(interactionSource = consumeTapInteractionSource, indication = null, onClick = {}),
                 color = Color(0xFF1A1A1A),
                 shape = RoundedCornerShape(28.dp),
                 border = BorderStroke(1.dp, Color(0xFF2A2A2A)),
@@ -2837,8 +3034,10 @@ private fun openPdfPreview(context: Context, uri: Uri) {
     tint: Color = Color.White,
     onClick: () -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
     Column(
-        modifier = Modifier.width(60.dp).height(64.dp).clickable(onClick = onClick),
+        modifier = Modifier.width(60.dp).height(64.dp)
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -2857,8 +3056,10 @@ private fun openPdfPreview(context: Context, uri: Uri) {
     onClick: () -> Unit,
     tint: Color = Color.White
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
     Column(
-        modifier = Modifier.width(60.dp).height(64.dp).clickable(onClick = onClick),
+        modifier = Modifier.width(60.dp).height(64.dp)
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
