@@ -38,16 +38,36 @@ interface FlowDao {
     @Query("SELECT * FROM flows WHERE id = :flowId LIMIT 1") fun observeFlow(flowId: String): Flow<FlowEntity?>
     @Query("SELECT * FROM flows WHERE id = :flowId LIMIT 1") suspend fun flow(flowId: String): FlowEntity?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsert(flow: FlowEntity)
+    @Insert suspend fun insertFlow(flow: FlowEntity)
+    @Update suspend fun updateFlow(flow: FlowEntity)
     @Query("SELECT * FROM screens WHERE flowId = :flowId ORDER BY position") fun observeScreens(flowId: String): Flow<List<ScreenEntity>>
     @Query("SELECT * FROM screens WHERE flowId = :flowId ORDER BY position") suspend fun screensForFlow(flowId: String): List<ScreenEntity>
     @Query("SELECT imagePath FROM screens") suspend fun referencedImagePaths(): List<String>
     @Insert suspend fun insertScreen(screen: ScreenEntity)
+    @Update suspend fun updateScreen(screen: ScreenEntity)
+    @Query("UPDATE screens SET markerX = :markerX, markerY = :markerY WHERE id = :screenId")
+    suspend fun updateScreenMarker(screenId: String, markerX: Float, markerY: Float)
     @Query("SELECT COUNT(*) FROM screens WHERE flowId = :flowId") suspend fun screenCount(flowId: String): Int
     @Query("SELECT * FROM screens WHERE flowId = :flowId ORDER BY position DESC LIMIT 1") suspend fun lastScreen(flowId: String): ScreenEntity?
     @Insert suspend fun insertTransition(transition: TransitionEntity)
     @Query("SELECT * FROM transitions WHERE flowId = :flowId ORDER BY createdAt") fun observeTransitions(flowId: String): Flow<List<TransitionEntity>>
     @Query("UPDATE flows SET updatedAt = :updatedAt WHERE id = :flowId") suspend fun touchFlow(flowId: String, updatedAt: Long)
     @Query("DELETE FROM flows WHERE id = :flowId") suspend fun deleteFlow(flowId: String)
+    @Query("SELECT imagePath FROM screens WHERE id = :screenId LIMIT 1") suspend fun screenImagePath(screenId: String): String?
+    @Query("DELETE FROM screens WHERE id = :screenId") suspend fun deleteScreen(screenId: String)
+
+    @Transaction
+    suspend fun deleteScreenAndGetImagePath(screenId: String): String? {
+        val imagePath = screenImagePath(screenId)
+        deleteScreen(screenId)
+        return imagePath
+    }
+
+    @Transaction
+    suspend fun updateScreenPointer(screen: ScreenEntity, markerX: Float, markerY: Float) {
+        updateScreenMarker(screen.id, markerX, markerY)
+        touchFlow(screen.flowId, System.currentTimeMillis())
+    }
 
     @Transaction
     suspend fun persistCapture(flowId: String, imagePath: String, markerX: Float, markerY: Float, now: Long) {
