@@ -55,7 +55,6 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -69,9 +68,6 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -120,6 +116,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.zIndex
+import androidx.core.graphics.scale
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.Font
@@ -162,6 +159,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlin.time.Duration.Companion.milliseconds
 import java.util.UUID
 import java.security.MessageDigest
 import java.util.zip.ZipEntry
@@ -345,10 +343,12 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
         launchExport({ writeFlowJpeg(getApplication(), screens, transitions, flow) }, onResult)
     fun exportPng(screens: List<ScreenEntity>, transitions: List<TransitionEntity>, flow: FlowEntity, onResult: (Result<Uri>) -> Unit) =
         launchExport({ writeFlowPng(getApplication(), screens, transitions, flow) }, onResult)
+    @Suppress("unused")
     fun exportDrawio(screens: List<ScreenEntity>, transitions: List<TransitionEntity>, flow: FlowEntity, onResult: (Result<Uri>) -> Unit) =
         launchExport({ writeFlowDrawio(getApplication(), screens, transitions, flow) }, onResult)
     fun exportSvg(screens: List<ScreenEntity>, transitions: List<TransitionEntity>, flow: FlowEntity, onResult: (Result<Uri>) -> Unit) =
         launchExport({ writeFlowSvg(getApplication(), screens, transitions, flow) }, onResult)
+    @Suppress("unused")
     fun exportSketch(screens: List<ScreenEntity>, transitions: List<TransitionEntity>, flow: FlowEntity, onResult: (Result<Uri>) -> Unit) =
         launchExport({ writeFlowSketch(getApplication(), screens, transitions, flow) }, onResult)
 
@@ -427,42 +427,6 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
             }
             items(flows, key = { it.id }) { flow ->
                 FlowTile(flow, vm) { openFlow(flow) }
-            }
-        }
-    }
-}
-
-@Composable private fun CaptureTipCard() {
-    Card(
-        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-        shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, Color(0xFFD9DDFF)),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFFF8F8FF)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 15.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                Modifier.size(46.dp).background(Color(0xFF4F46E5), RoundedCornerShape(15.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.PhoneAndroid, "Capture tip", tint = Color.White, modifier = Modifier.size(25.dp))
-            }
-            Spacer(Modifier.width(14.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text("Place the capture marker", color = Color(0xFF1F1F2E), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                Text("Drag the floating button to the exact place you tapped.", color = Color(0xFF63677A), fontSize = 11.sp, lineHeight = 15.sp)
-            }
-            Surface(shape = CircleShape, color = Color(0xFFE8E7FF)) {
-                Text(
-                    "i",
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                    color = Color(0xFF4F46E5),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
-                )
             }
         }
     }
@@ -706,7 +670,7 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
                     },
                     modifier = Modifier.weight(1f).height(54.dp),
                     shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F766E), contentColor = Color.White)
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF312E81), contentColor = Color.White)
                 ) { Text("FINISH", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                 }
             }
@@ -832,7 +796,7 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
         captureLaunchInProgress = false
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
             pendingResult = result
-                    if (tipPreferences.getBoolean("hide_capture_tip", false)) ContextCompat.startForegroundService(context, Intent(context, CaptureService::class.java).putExtra(CaptureService.EXTRA_FLOW_ID, flow.id).putExtra(CaptureService.EXTRA_RESULT_CODE, result.resultCode).putExtra(CaptureService.EXTRA_RESULT_DATA, result.data))
+            if (tipPreferences.getBoolean("hide_capture_tip", false)) ContextCompat.startForegroundService(context, Intent(context, CaptureService::class.java).putExtra(CaptureService.EXTRA_FLOW_ID, flow.id).putExtra(CaptureService.EXTRA_RESULT_CODE, result.resultCode).putExtra(CaptureService.EXTRA_RESULT_DATA, result.data))
             else showTips = true
         } else {
             android.widget.Toast.makeText(context, "Screen capture permission was not granted", android.widget.Toast.LENGTH_LONG).show()
@@ -1160,7 +1124,7 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
                     },
                         colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = Color.White),
                         shape = RoundedCornerShape(14.dp),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 22.dp, vertical = 12.dp)
+                        contentPadding = PaddingValues(horizontal = 22.dp, vertical = 12.dp)
                     ) { Text("SAVE AS", fontWeight = FontWeight.Bold) }
                 }
             }
@@ -1470,11 +1434,9 @@ private fun decodeExportBitmap(path: String, maxWidth: Int, maxHeight: Int): and
     if (decoded.width <= maxWidth && decoded.height <= maxHeight) return decoded
 
     val scale = minOf(maxWidth.toFloat() / decoded.width, maxHeight.toFloat() / decoded.height)
-    val scaled = android.graphics.Bitmap.createScaledBitmap(
-        decoded,
+    val scaled = decoded.scale(
         (decoded.width * scale).toInt().coerceAtLeast(1),
-        (decoded.height * scale).toInt().coerceAtLeast(1),
-        true
+        (decoded.height * scale).toInt().coerceAtLeast(1)
     )
     decoded.recycle()
     return scaled
@@ -1837,7 +1799,7 @@ private fun writeFlowSvg(
     val rows = (screens.size + columns - 1) / columns
     val width = margin * 2 + columns * nodeWidth + (columns - 1) * gap
     val height = margin * 2 + rows * nodeHeight + (rows - 1) * gap
-    val positions = screens.mapIndexed { index, _ ->
+    val positions = List(screens.size) { index ->
         val row = index / columns
         val column = index % columns
         android.graphics.RectF(
@@ -2002,8 +1964,6 @@ private fun writeFlowSketch(
     val rows = (screens.size + columns - 1) / columns
     val pageWidth = margin * 2 + columns * nodeWidth + (columns - 1) * gap
     val pageHeight = margin * 2 + rows * nodeHeight + (rows - 1) * gap
-    val screenIndex = screens.withIndex().associate { it.value.id to it.index }
-
     fun frame(x: Double, y: Double, width: Double, height: Double) = JSONObject()
         .put("_class", "rect")
         .put("constrainProportions", false)
@@ -2300,7 +2260,7 @@ private fun sketchDisplayName(flowName: String): String {
         .replace(Regex("(?i)(\\.sketch|\\.zip)+$"), "")
         .trimEnd('.')
         .ifBlank { "flowsnap" }
-    // Make the name unique before MediaStore inserts it. Otherwise some providers append
+    // Make the name unique before MediaStore inserts it. Otherwise, some providers append
     // " (1)" after the extension, yielding `flow.sketch (1)`, which Figma will not filter.
     return "$sanitized-${System.currentTimeMillis()}.sketch"
 }
@@ -2546,16 +2506,17 @@ private fun openPdfPreview(context: Context, uri: Uri) {
     androidx.compose.runtime.DisposableEffect(hostActivity) {
         val hostWindow = hostActivity?.window
         val controller = hostWindow?.let { WindowCompat.getInsetsController(it, it.decorView) }
-        val previousLightStatusIcons = controller?.isAppearanceLightStatusBars
-        val previousLightNavigationIcons = controller?.isAppearanceLightNavigationBars
+            ?: return@DisposableEffect onDispose { }
+        val previousLightStatusIcons = controller.isAppearanceLightStatusBars
+        val previousLightNavigationIcons = controller.isAppearanceLightNavigationBars
         // Android 15 draws system bars edge-to-edge. The lightbox owns the
         // visible dark system-bar backdrop in Compose, so no deprecated
         // Window status/navigation-bar color mutation is necessary.
-        controller?.isAppearanceLightStatusBars = false
-        controller?.isAppearanceLightNavigationBars = false
+        controller.isAppearanceLightStatusBars = false
+        controller.isAppearanceLightNavigationBars = false
         onDispose {
-            if (previousLightStatusIcons != null) controller?.isAppearanceLightStatusBars = previousLightStatusIcons
-            if (previousLightNavigationIcons != null) controller?.isAppearanceLightNavigationBars = previousLightNavigationIcons
+            controller.isAppearanceLightStatusBars = previousLightStatusIcons
+            controller.isAppearanceLightNavigationBars = previousLightNavigationIcons
         }
     }
     val bitmap = rememberScreenBitmaps(listOf(screen), maxDimension = 2400)[screen.id]
@@ -2581,7 +2542,7 @@ private fun openPdfPreview(context: Context, uri: Uri) {
     androidx.compose.runtime.LaunchedEffect(closeRequested) {
         if (closeRequested) {
             visible = false
-            delay(180)
+            delay(180.milliseconds)
             onDismiss()
         }
     }
@@ -2799,7 +2760,7 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                             editingPointer = false
                         }
                     } else {
-                    LightboxDrawableAction(R.drawable.ic_lightbox_share, "Share") {
+                    LightboxDrawableAction(R.drawable.ic_lightbox_share, "Share", onClick = {
                         runCatching {
                             val imageUri = FileProvider.getUriForFile(
                                 context,
@@ -2818,17 +2779,19 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                         }.onFailure {
                             android.widget.Toast.makeText(context, "Unable to share screenshot", android.widget.Toast.LENGTH_SHORT).show()
                         }
-                    }
-                    LightboxDrawableAction(R.drawable.ic_lightbox_delete, "Delete", tint = Color.White) {
-                        showDeleteConfirmation = true
-                    }
-                    LightboxDrawableAction(R.drawable.ic_lightbox_replace, "Replace") {
+                    })
+                    LightboxDrawableAction(
+                        R.drawable.ic_lightbox_delete,
+                        "Delete",
+                        onClick = { showDeleteConfirmation = true },
+                        tint = Color.White
+                    )
+                    LightboxDrawableAction(R.drawable.ic_lightbox_replace, "Replace", onClick = {
                         onReplace(screen)
-                        requestClose()
-                    }
-                    LightboxDrawableAction(R.drawable.ic_lightbox_edit, "Edit") {
+                    })
+                    LightboxDrawableAction(R.drawable.ic_lightbox_edit, "Edit", onClick = {
                         editingPointer = true
-                    }
+                    })
                     }
                 }
             }
@@ -2891,8 +2854,8 @@ private fun openPdfPreview(context: Context, uri: Uri) {
 @Composable private fun LightboxDrawableAction(
     @androidx.annotation.DrawableRes iconRes: Int,
     label: String,
-    tint: Color = Color.White,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    tint: Color = Color.White
 ) {
     Column(
         modifier = Modifier.width(60.dp).height(64.dp).clickable(onClick = onClick),
@@ -2919,9 +2882,9 @@ private fun openPdfPreview(context: Context, uri: Uri) {
     bitmaps: Map<String, androidx.compose.ui.graphics.ImageBitmap>,
     showMobileStencils: Boolean,
     connectorColor: Color,
+    modifier: Modifier = Modifier,
     columnsOverride: Int? = null,
-    onScreenClick: (ScreenEntity) -> Unit = {},
-    modifier: Modifier = Modifier
+    onScreenClick: (ScreenEntity) -> Unit = {}
 ) = Canvas(
     modifier.pointerInput(screens, bitmaps, columnsOverride) {
         detectTapGestures { tap ->
@@ -2985,12 +2948,11 @@ private fun openPdfPreview(context: Context, uri: Uri) {
     val heightBound = (size.height - margin * 2 - rowGap * (rows - 1)) / (rows * aspectRatio)
     val nodeWidth = minOf(widthBound, heightBound).coerceAtLeast(1f)
     val nodeHeight = nodeWidth * aspectRatio
-    val contentHeight = rows * nodeHeight + (rows - 1) * rowGap
     // The diagram is a vertically scrolling document. Centering a narrow
     // five-column grid inside the fixed canvas left a large blank band above
     // the first row; keep it anchored to the card's normal top padding.
     val topInset = margin
-    val positions = screens.mapIndexed { index, _ ->
+    val positions = List(screens.size) { index ->
         val row = index / columns
         val column = index % columns
         val itemsInThisRow = minOf(columns, screens.size - row * columns)
