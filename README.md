@@ -21,8 +21,8 @@ The Gradle wrapper is checked in. To build from the command line, use a Java 17 
 
 ## Planned milestones
 
-2. Editor: pan/zoom Compose canvas, draggable nodes, manually-marked transition anchors, and arrows.
-3. Delivery: diagram PNG export through `Bitmap`/`Canvas`, Android share sheet, tests, and a release-ready privacy/data-deletion pass.
+1. Editor: pan/zoom Compose canvas, draggable nodes, manually-marked transition anchors, and arrows.
+2. Delivery: diagram PNG export through `Bitmap`/`Canvas`, Android share sheet, tests, and a release-ready privacy/data-deletion pass.
 
 ## Important capture rules
 
