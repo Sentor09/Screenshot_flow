@@ -20,6 +20,7 @@ import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -77,12 +78,41 @@ class CaptureService : Service() {
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
         @Suppress("DEPRECATION") val resultData = intent?.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
         if (flowId.isBlank() || resultData == null) { stopSelf(); return START_NOT_STICKY }
-        startNotification()
-        projection = getSystemService(MediaProjectionManager::class.java).getMediaProjection(resultCode, resultData)
-        projection.registerCallback(object : MediaProjection.Callback() { override fun onStop() = stopCapture() }, null)
-        val metrics = resources.displayMetrics
-        reader = ImageReader.newInstance(metrics.widthPixels, metrics.heightPixels, PixelFormat.RGBA_8888, 2)
-        virtualDisplay = projection.createVirtualDisplay("FlowSnap capture", metrics.widthPixels, metrics.heightPixels, metrics.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null)
+        // Android 15/16 applies stricter foreground-service and projection
+        // checks. Do all session setup in one guarded block so a rejected or
+        // expired consent token stops the service cleanly instead of crashing
+        // the app process.
+        val started = runCatching {
+            startNotification()
+            projection = getSystemService(MediaProjectionManager::class.java)
+                .getMediaProjection(resultCode, resultData)
+            projection.registerCallback(
+                object : MediaProjection.Callback() { override fun onStop() = stopCapture() },
+                mainHandler
+            )
+            val metrics = resources.displayMetrics
+            reader = ImageReader.newInstance(
+                metrics.widthPixels,
+                metrics.heightPixels,
+                PixelFormat.RGBA_8888,
+                2
+            )
+            virtualDisplay = projection.createVirtualDisplay(
+                "FlowSnap capture",
+                metrics.widthPixels,
+                metrics.heightPixels,
+                metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface,
+                null,
+                mainHandler
+            )
+        }.onFailure { error ->
+            Log.e("FlowSnapCapture", "Unable to start a MediaProjection session", error)
+            Toast.makeText(this, "Screen capture could not start. Please try again.", Toast.LENGTH_LONG).show()
+            stopCapture()
+        }.isSuccess
+        if (!started) return START_NOT_STICKY
         if (Settings.canDrawOverlays(this)) {
             showBubble()
             // Put FlowSnap in the background after its overlay has been attached.
