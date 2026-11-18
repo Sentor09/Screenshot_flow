@@ -38,6 +38,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -45,12 +46,16 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -62,6 +67,11 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -74,12 +84,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.Surface
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Typography
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -88,23 +101,33 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.SideEffect
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
@@ -114,6 +137,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.shape.CircleShape
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.content.edit
 import androidx.core.graphics.createBitmap
 import androidx.core.net.toUri
@@ -137,6 +161,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import java.util.UUID
 import java.security.MessageDigest
 import java.util.zip.ZipEntry
@@ -175,8 +200,6 @@ class MainActivity : ComponentActivity() {
     private val captureReadyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             acceptReviewIntent(intent)
-            startActivity(Intent(this@MainActivity, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP))
         }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -276,6 +299,26 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
         ScreenshotStorage.deleteFlowFolder(getApplication(), flow.id)
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { onDeleted() }
     }
+    fun deleteScreen(screen: ScreenEntity, onDeleted: () -> Unit) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        dao.deleteScreenAndGetImagePath(screen.id)?.let { path -> runCatching { java.io.File(path).delete() } }
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { onDeleted() }
+    }
+    fun updateScreenPointer(screen: ScreenEntity, markerX: Float, markerY: Float, onSaved: () -> Unit) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        dao.updateScreenPointer(screen, markerX, markerY)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { onSaved() }
+    }
+    fun replaceScreenImage(screen: ScreenEntity, source: Uri, onComplete: (Boolean) -> Unit) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        val result = runCatching {
+            val replacement = ScreenshotStorage.newCaptureFile(getApplication(), screen.flowId)
+            getApplication<android.app.Application>().contentResolver.openInputStream(source)?.use { input ->
+                replacement.outputStream().use { output -> input.copyTo(output) }
+            } ?: error("Unable to read selected image")
+            dao.updateScreen(screen.copy(imagePath = replacement.absolutePath))
+            dao.touchFlow(screen.flowId, System.currentTimeMillis())
+            runCatching { java.io.File(screen.imagePath).delete() }
+        }
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { onComplete(result.isSuccess) }
+    }
     fun screens(flowId: String) = dao.observeScreens(flowId)
     fun transitions(flowId: String) = dao.observeTransitions(flowId)
     fun flow(flowId: String) = dao.observeFlow(flowId)
@@ -312,17 +355,37 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
 }
 
 @Composable private fun FlowSnapApp(review: CaptureReview?, dismissReview: () -> Unit, vm: FlowViewModel = viewModel()) {
-    var selectedFlowId by rememberSaveable { mutableStateOf<String?>(null) }
-    androidx.compose.runtime.LaunchedEffect(review?.path) { vm.cleanupOrphanedCaptures(review?.path) }
-    if (review != null) CaptureReviewScreen(review, vm, dismissReview, onFinish = { savedFlow ->
-        if (savedFlow != null) selectedFlowId = savedFlow.id
-        dismissReview()
-    }) else if (selectedFlowId == null) {
-        HomeScreen(vm) { selectedFlowId = it.id }
-    } else {
-        // The preceding null branch guarantees this route has an id.
-        val flowId = requireNotNull(selectedFlowId)
-        DiagramScreen(flowId, vm) { selectedFlowId = null }
+    Box(Modifier.fillMaxSize().background(Color.White)) {
+        var selectedFlowId by rememberSaveable { mutableStateOf<String?>(null) }
+        var lightboxOpen by remember { mutableStateOf(false) }
+        androidx.compose.runtime.LaunchedEffect(review?.path) { vm.cleanupOrphanedCaptures(review?.path) }
+        if (review != null) CaptureReviewScreen(review, vm, dismissReview, onFinish = { savedFlow ->
+            if (savedFlow != null) selectedFlowId = savedFlow.id
+            dismissReview()
+        }) else if (selectedFlowId == null) {
+            HomeScreen(vm) { selectedFlowId = it.id }
+        } else {
+            // The preceding null branch guarantees this route has an id.
+            val flowId = requireNotNull(selectedFlowId)
+            DiagramScreen(
+                flowId = flowId,
+                vm = vm,
+                goBack = { selectedFlowId = null },
+                onLightboxVisibilityChange = { lightboxOpen = it }
+            )
+        }
+        // Keep Android's transparent edge-to-edge status area white on the
+        // normal app screens. The lightbox overrides this in its own window.
+        Box(
+            Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .windowInsetsTopHeight(WindowInsets.statusBars)
+                // The dialog dim layer makes this render as the requested
+                // near-black #1A1A1A while a screenshot preview is open.
+                .background(if (lightboxOpen) Color(0xFF2A2A2A) else Color.White)
+                .zIndex(10f)
+        )
     }
 }
 
@@ -330,16 +393,30 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
     val flows by vm.flows.collectAsStateWithLifecycle()
     // Keep gallery cards above the Android gesture/three-button navigation area.
     Column(Modifier.fillMaxSize().background(Color(0xFFF5F5F5)).windowInsetsPadding(WindowInsets.systemBars)) {
-        Row(Modifier.fillMaxWidth().height(64.dp).background(Color.White).padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(64.dp)
+                .zIndex(1f)
+                .shadow(
+                    elevation = 6.dp,
+                    ambientColor = Color.Transparent,
+                    spotColor = Color(0x4D000000)
+                )
+                .background(Color.White)
+                .padding(horizontal = 18.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Icon(Icons.Default.Menu, "Menu", Modifier.size(28.dp), tint = Color(0xFF656565))
             Spacer(Modifier.width(20.dp))
-            Text("Screenshot", color = Color(0xFF274786), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Light, maxLines = 1)
-            Text(" Flow", color = Color(0xFF5A91B8), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Light, maxLines = 1)
+            Text("Flow", color = Color(0xFF312E81), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Light, maxLines = 1)
+            Text("Snap", color = Color(0xFF4F46E5), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Light, maxLines = 1)
             Spacer(Modifier.weight(1f))
         }
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
-            modifier = Modifier.weight(1f).fillMaxWidth().padding(16.dp),
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = PaddingValues(16.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -355,63 +432,166 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
     }
 }
 
-@Composable private fun CreateFlowTile(modifier: Modifier, onClick: () -> Unit) = Card(onClick = onClick, modifier = modifier, elevation = CardDefaults.cardElevation(defaultElevation = 6.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF344B93))) { Box(Modifier.fillMaxSize().padding(18.dp)) { Text("+", Modifier.align(Alignment.Center), color = Color.White, style = MaterialTheme.typography.displayLarge.copy(fontSize = 94.sp), fontWeight = FontWeight.Light); Text("Create new diagram", Modifier.align(Alignment.BottomStart), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false) } }
+@Composable private fun CaptureTipCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, Color(0xFFD9DDFF)),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF8F8FF)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 15.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier.size(46.dp).background(Color(0xFF4F46E5), RoundedCornerShape(15.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.PhoneAndroid, "Capture tip", tint = Color.White, modifier = Modifier.size(25.dp))
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text("Place the capture marker", color = Color(0xFF1F1F2E), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text("Drag the floating button to the exact place you tapped.", color = Color(0xFF63677A), fontSize = 11.sp, lineHeight = 15.sp)
+            }
+            Surface(shape = CircleShape, color = Color(0xFFE8E7FF)) {
+                Text(
+                    "i",
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    color = Color(0xFF4F46E5),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+@Composable private fun CreateFlowTile(modifier: Modifier, onClick: () -> Unit) = Card(
+    onClick = onClick,
+    modifier = modifier,
+    shape = RoundedCornerShape(20.dp),
+    // Match the preview card: a subtle neutral edge softens the elevated
+    // surface without reintroducing the previous violet outline.
+    border = BorderStroke(1.dp, Color(0xFFE1E7F0)),
+    elevation = CardDefaults.cardElevation(defaultElevation = 5.dp),
+    colors = CardDefaults.cardColors(containerColor = Color.White)
+) {
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Surface(
+                modifier = Modifier.size(76.dp),
+                shape = CircleShape,
+                color = Color(0xFF4F46E5),
+                shadowElevation = 2.dp
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.Add, "Create diagram", tint = Color.White, modifier = Modifier.size(42.dp))
+                }
+            }
+        }
+        Text("Create diagram", modifier = Modifier.fillMaxWidth(), color = Color(0xFF4F46E5), fontSize = 16.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+    }
+}
 
 @Composable private fun FlowTile(flow: FlowEntity, vm: FlowViewModel, onClick: () -> Unit) {
     val screens by vm.screens(flow.id).collectAsStateWithLifecycle(initialValue = emptyList())
-    val transitions by vm.transitions(flow.id).collectAsStateWithLifecycle(initialValue = emptyList())
-    val bitmaps = rememberScreenBitmaps(screens, maxDimension = 360)
+    // Keep gallery previews readable: one recognisable cover screen plus a
+    // small stack communicates a flow without shrinking every screen.
+    val previewScreens = screens.take(3)
+    val bitmaps = rememberScreenBitmaps(previewScreens, maxDimension = 360)
     Card(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth().aspectRatio(.72f),
-        shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, Color(0xFFE0E0E0)),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, Color(0xFFE1E7F0)),
         colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 5.dp)
     ) {
-        Column(Modifier.padding(10.dp).fillMaxSize()) {
-            Column(
-                Modifier.weight(1f).fillMaxWidth()
-                    .background(Color.White)
-                    .border(1.dp, Color(0xFFF0F0F0), RoundedCornerShape(1.dp))
-                    .padding(4.dp)
-            ) {
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                if (screens.isNotEmpty()) {
-                    FlowDiagramCanvas(
-                        screens = screens,
-                        transitions = transitions,
-                        bitmaps = bitmaps,
-                        showMobileStencils = flow.showMobileStencils,
-                        // FlowEntity stores a normal ARGB value. Use the Int overload;
-                        // the ULong overload expects Compose's internal packed Color format.
-                        connectorColor = Color(flow.connectorColor.toInt()),
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
-                }
-                Row(
-                    Modifier.fillMaxWidth().height(15.dp)
-                        .border(1.dp, Color(0xFFE6E6E6), RoundedCornerShape(0.dp))
-                        .padding(horizontal = 3.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(flow.name, fontSize = 5.sp, color = Color(0xFF555555), maxLines = 1)
-                    Text("v1.0", fontSize = 5.sp, color = Color(0xFF555555))
-                    Text("You", fontSize = 5.sp, color = Color(0xFF555555))
+        Column(Modifier.padding(12.dp).fillMaxSize()) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("FLOW PREVIEW", color = Color(0xFF64748B), fontSize = 8.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
+                Spacer(Modifier.weight(1f))
+                Surface(color = Color(0xFFEEF2FF), shape = RoundedCornerShape(20.dp)) {
+                    Text("${screens.size} ${if (screens.size == 1) "screen" else "screens"}", Modifier.padding(horizontal = 7.dp, vertical = 3.dp), color = Color(0xFF4F46E5), fontSize = 8.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
             Spacer(Modifier.height(9.dp))
+            Box(
+                Modifier.weight(1f).fillMaxWidth()
+                    .background(Color(0xFFF7F9FC), RoundedCornerShape(12.dp))
+                    .border(1.dp, Color(0xFFE5EAF2), RoundedCornerShape(12.dp))
+                    .padding(7.dp)
+            ) {
+                if (previewScreens.isNotEmpty()) {
+                    GalleryFlowPreview(previewScreens, bitmaps)
+                } else {
+                    Text("Your captured flow\nwill appear here", Modifier.align(Alignment.Center), color = Color(0xFF94A3B8), fontSize = 11.sp, textAlign = TextAlign.Center, lineHeight = 15.sp)
+                }
+            }
             Text(
                 flow.name,
-                modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFF314A87),
-                fontSize = 17.sp,
-                lineHeight = 20.sp,
-                fontWeight = FontWeight.Medium,
-                textAlign = TextAlign.Center,
-                maxLines = 2
+                modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                color = Color(0xFF312E81),
+                fontSize = 15.sp,
+                lineHeight = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text("Updated ${java.text.SimpleDateFormat("MMM d", java.util.Locale.getDefault()).format(java.util.Date(flow.updatedAt))}", Modifier.padding(top = 3.dp), color = Color(0xFF7B8798), fontSize = 10.sp)
+        }
+    }
+}
+
+/** A readable gallery cover: the entry screen is prominent and later steps form a small stack. */
+@Composable private fun GalleryFlowPreview(
+    screens: List<ScreenEntity>,
+    bitmaps: Map<String, androidx.compose.ui.graphics.ImageBitmap>
+) {
+    Box(Modifier.fillMaxSize()) {
+        GalleryPreviewImage(
+            screen = screens.first(),
+            bitmaps = bitmaps,
+            modifier = Modifier.align(Alignment.CenterStart).fillMaxHeight(.96f).fillMaxWidth(if (screens.size == 1) .72f else .58f)
+        )
+        screens.getOrNull(1)?.let { screen ->
+            GalleryPreviewImage(
+                screen = screen,
+                bitmaps = bitmaps,
+                modifier = Modifier.align(Alignment.TopEnd).fillMaxWidth(.34f).fillMaxHeight(.45f)
+            )
+        }
+        screens.getOrNull(2)?.let { screen ->
+            GalleryPreviewImage(
+                screen = screen,
+                bitmaps = bitmaps,
+                modifier = Modifier.align(Alignment.BottomEnd).fillMaxWidth(.34f).fillMaxHeight(.45f)
+            )
+        }
+    }
+}
+
+@Composable private fun GalleryPreviewImage(
+    screen: ScreenEntity,
+    bitmaps: Map<String, androidx.compose.ui.graphics.ImageBitmap>,
+    modifier: Modifier
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(7.dp),
+        color = Color(0xFFE2E8F0),
+        border = BorderStroke(1.dp, Color.White),
+        shadowElevation = 1.dp
+    ) {
+        val bitmap = bitmaps[screen.id]
+        if (bitmap != null) {
+            androidx.compose.foundation.Image(
+                bitmap = bitmap,
+                contentDescription = "Flow screen preview",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
             )
         }
     }
@@ -447,68 +627,99 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
         } else review
     } ?: review
     // Keep the review actions above Android's gesture/navigation area.
-    val primaryBlue = Color(0xFF24519B)
+    val primaryBlue = Color(0xFF4F46E5)
+    val pageBackground = Color(0xFFF5F6FA)
     Column(
-        Modifier.fillMaxSize().background(Color(0xFFF4F6F9)).windowInsetsPadding(WindowInsets.systemBars),
+        Modifier.fillMaxSize().background(pageBackground).windowInsetsPadding(WindowInsets.systemBars),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Box(Modifier.fillMaxWidth().height(52.dp).background(Color.White))
-        Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-          Surface(
-              // Preserve the original review-canvas bounds so the screenshot,
-              // marker, and connector retain their established placement.
-              modifier = Modifier.fillMaxWidth().fillMaxSize().padding(horizontal = 38.dp, vertical = 18.dp),
-              color = Color(0xFFE9EEF5),
-              shape = RoundedCornerShape(20.dp),
-              shadowElevation = 8.dp
-          ) {
-           Box(Modifier.fillMaxSize()) {
-            if (bitmap != null) androidx.compose.foundation.Image(bitmap, "Captured screen", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-            Canvas(Modifier.fillMaxSize().onSizeChanged { reviewCanvasSize = it }.pointerInput(Unit) { detectDragGestures(onDragStart = { draggedMarker = it }) { change, amount -> change.consume(); draggedMarker = (draggedMarker ?: change.position) + amount } }) {
-                val marker = draggedMarker ?: Offset(size.width * review.markerX, size.height * review.markerY)
-                // Keep the transition marker deliberately minimal: no label or
-                // coloured halo over the captured screen.
-                drawCircle(Color.White, 26f, marker)
-                drawCircle(Color(0xFF4D4D4D), 9f, marker)
-                drawLine(Color(0xFF5C5C5C), marker, Offset(size.width, marker.y), 6f)
-            }
-           }
-          }
-        }
-        Surface(color = Color.White, shadowElevation = 4.dp) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = Color.White,
+            shadowElevation = 1.dp
+        ) {
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 18.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("Review capture", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF17171A))
+                    Text("Drag the marker to set the next step", fontSize = 12.sp, color = Color(0xFF6B7280))
+                }
+            }
+        }
+        Box(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 20.dp, vertical = 18.dp), contentAlignment = Alignment.Center) {
+            Surface(
+                // Keep the capture, marker, and connector together in the same
+                // review canvas; only its surrounding presentation has changed.
+                modifier = Modifier.fillMaxSize(),
+                color = Color.White,
+                shape = RoundedCornerShape(28.dp),
+                shadowElevation = 10.dp
+            ) {
+                Column(Modifier.fillMaxSize()) {
+                    Box(Modifier.fillMaxWidth().weight(1f).padding(12.dp)) {
+                        Box(Modifier.fillMaxSize().clip(RoundedCornerShape(18.dp)).background(Color(0xFFE9EEF5))) {
+                            if (bitmap != null) androidx.compose.foundation.Image(bitmap, "Captured screen", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+                            Canvas(Modifier.fillMaxSize().onSizeChanged { reviewCanvasSize = it }.pointerInput(Unit) { detectDragGestures(onDragStart = { draggedMarker = it }) { change, amount -> change.consume(); draggedMarker = (draggedMarker ?: change.position) + amount } }) {
+                                val marker = draggedMarker ?: Offset(size.width * review.markerX, size.height * review.markerY)
+                                // Keep the transition marker deliberately minimal: no label or coloured halo.
+                                drawCircle(Color.White, 26f, marker)
+                                drawCircle(Color(0xFF4D4D4D), 9f, marker)
+                                drawLine(Color(0xFF5C5C5C), marker, Offset(size.width, marker.y), 6f)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = Color.White,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+            shadowElevation = 12.dp
+        ) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                 OutlinedButton(
                     onClick = { java.io.File(review.path).delete(); returnToCapturedApp() },
-                    modifier = Modifier.weight(1f).height(52.dp),
-                    shape = RoundedCornerShape(26.dp),
+                    modifier = Modifier.weight(.84f).height(54.dp),
+                    shape = RoundedCornerShape(16.dp),
                     border = BorderStroke(1.5.dp, Color(0xFFB3261E)),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB3261E))
                 ) { Text("DISCARD", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                 Button(
                     onClick = { vm.keepCapture(reviewedCapture); returnToCapturedApp() },
-                    modifier = Modifier.weight(1f).height(52.dp),
-                    shape = RoundedCornerShape(26.dp),
+                    modifier = Modifier.weight(1f).height(54.dp),
+                    shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = Color.White)
-                ) { Text("KEEP + NEXT", fontSize = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
+                ) { Text("KEEP + NEXT", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                 Button(
                     onClick = {
                         context.startService(Intent(context, CaptureService::class.java).setAction(CaptureService.ACTION_STOP))
                         vm.keepCaptureAndOpenDiagram(reviewedCapture, onFinish)
                     },
-                    modifier = Modifier.weight(1f).height(52.dp),
-                    shape = RoundedCornerShape(26.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = Color.White)
-                ) { Text("KEEP FINISH", fontSize = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
+                    modifier = Modifier.weight(1f).height(54.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F766E), contentColor = Color.White)
+                ) { Text("FINISH", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
+                }
             }
         }
     }
 }
 
-@Composable private fun DiagramScreen(flowId: String, vm: FlowViewModel, goBack: () -> Unit) {
+@Composable private fun DiagramScreen(
+    flowId: String,
+    vm: FlowViewModel,
+    goBack: () -> Unit,
+    onLightboxVisibilityChange: (Boolean) -> Unit = {}
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val tipPreferences = remember { context.getSharedPreferences("flowsnap", Context.MODE_PRIVATE) }
     val projectionManager = remember { context.getSystemService(MediaProjectionManager::class.java) }
@@ -534,6 +745,16 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
     var showDeleteConfirmation by remember { mutableStateOf(false) }
     var showDiagramSettings by remember { mutableStateOf(false) }
     var showExportFormats by remember { mutableStateOf(false) }
+    var replacementTarget by remember { mutableStateOf<ScreenEntity?>(null) }
+    val replaceImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val target = replacementTarget
+        replacementTarget = null
+        if (uri != null && target != null) {
+            vm.replaceScreenImage(target, uri) { replaced ->
+                android.widget.Toast.makeText(context, if (replaced) "Screenshot replaced" else "Unable to replace screenshot", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
     val exportPdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
         uri?.let { destination ->
             vm.exportPdf(destination, screens, transitions, flow) { result ->
@@ -673,12 +894,23 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
         // The padding keeps document content clear of those controls.
         EditorCircle(Icons.Default.Home, "Home", goBack, modifier = Modifier.align(Alignment.TopStart).padding(20.dp))
         EditorCircle(Icons.Default.Settings, "Settings", onClick = { showDiagramSettings = true }, enabled = hasScreens, modifier = Modifier.align(Alignment.TopCenter).padding(top = 20.dp))
-        if (screens.isEmpty()) Text("Create a diagram with the + option below", Modifier.align(Alignment.Center), color = Color(0xFF24519B), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        if (screens.isEmpty()) Text("Create a diagram with the + option below", Modifier.align(Alignment.Center), color = Color(0xFF4F46E5), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         else {
             DiagramPreview(
                 screens = screens,
                 transitions = transitions,
                 flow = flow,
+                onDeleteScreen = { screen -> vm.deleteScreen(screen) { android.widget.Toast.makeText(context, "Screenshot deleted", android.widget.Toast.LENGTH_SHORT).show() } },
+                onReplaceScreen = { screen ->
+                    replacementTarget = screen
+                    replaceImage.launch("image/*")
+                },
+                onUpdatePointer = { screen, markerX, markerY ->
+                    vm.updateScreenPointer(screen, markerX, markerY) {
+                        android.widget.Toast.makeText(context, "Pointer updated", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                },
+                onLightboxVisibilityChange = onLightboxVisibilityChange,
                 // The white card itself stays in this protected viewport. Only
                 // its document content scrolls, so its rounded top and bottom
                 // corners remain visible at every scroll position.
@@ -761,7 +993,7 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
                     CircularProgressIndicator(
                         modifier = Modifier.size(28.dp),
                         strokeWidth = 3.dp,
-                        color = Color(0xFF24519B)
+                        color = Color(0xFF4F46E5)
                     )
                     Spacer(Modifier.width(16.dp))
                     Text(
@@ -810,7 +1042,7 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
 }
 
 @Composable private fun CaptureTipDialog(onConfirm: (Boolean) -> Unit) {
-    val primaryBlue = Color(0xFF24519B)
+    val primaryBlue = Color(0xFF4F46E5)
     var dontShowAgain by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = { },
@@ -862,13 +1094,13 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
     onExportSketch: () -> Unit,
     onUnavailable: (String) -> Unit
 ) {
-    val primaryBlue = Color(0xFF24519B)
+    val primaryBlue = Color(0xFF4F46E5)
     var selected by remember { mutableStateOf("JPEG") }
     val formats = listOf(
         "JPEG" to "Static uneditable JPEG (Joint Photographic Experts Group) image",
         "PNG" to "Portable Network Graphics image",
         "PDF" to "Portable Document Format",
-        "SVG / FIGMA (.svg)" to "Figma-compatible SVG with embedded screenshots and editable arrows"
+        "SVG / FIGMA (.svg)" to "Editable SVG for Figma."
     )
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(
@@ -1010,7 +1242,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
                         Text("CANCEL", color = Color(0xFF5E6F8E), fontWeight = FontWeight.SemiBold)
                     }
                     TextButton(onClick = { onSave(title, version, createdBy, showTitle, showVersion, showCreatedAt, showCreatedBy, showAppVersion, showMobileStencils, connectorColor) }) {
-                        Text("SAVE", color = Color(0xFF274D89), fontWeight = FontWeight.Bold)
+                        Text("SAVE", color = Color(0xFF4F46E5), fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -1029,16 +1261,25 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
                     .padding(horizontal = 16.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
-                BasicTextField(
-                    value = value,
-                    onValueChange = onValueChange,
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    textStyle = androidx.compose.ui.text.TextStyle(
-                        fontSize = 15.sp,
-                        color = Color(0xFF202B3B)
+                val primaryBlue = Color(0xFF4F46E5)
+                CompositionLocalProvider(
+                    LocalTextSelectionColors provides TextSelectionColors(
+                        handleColor = primaryBlue,
+                        backgroundColor = primaryBlue.copy(alpha = .28f)
                     )
-                )
+                ) {
+                    BasicTextField(
+                        value = value,
+                        onValueChange = onValueChange,
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        cursorBrush = SolidColor(primaryBlue),
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            fontSize = 15.sp,
+                        color = Color(0xFF202B3B)
+                        )
+                    )
+                }
             }
             Spacer(Modifier.width(10.dp))
             IncludedMark(included, toggleIncluded)
@@ -1072,13 +1313,13 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Box(
             Modifier.size(36.dp)
-                .border(1.5.dp, Color(0xFF647A9E), RoundedCornerShape(10.dp)),
+                .border(1.5.dp, Color(0xFF4F46E5), RoundedCornerShape(10.dp)),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = Icons.Default.PhoneAndroid,
                 contentDescription = "Mobile stencil",
-                tint = Color(0xFF315789),
+                tint = Color(0xFF4F46E5),
                 modifier = Modifier.size(21.dp)
             )
         }
@@ -1095,7 +1336,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 @Composable private fun ConnectorColorSetting(selectedColor: Long, onColorSelected: (Long) -> Unit) {
     val colors = listOf(
         0xFF69B83AL to "Green",
-        0xFF24519BL to "Blue",
+        0xFF4F46E5L to "Indigo",
         0xFFE05252L to "Red",
         0xFF4D4D4DL to "Charcoal",
         0xFFF39C12L to "Orange",
@@ -1137,17 +1378,17 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     val hovered by interactionSource.collectIsHoveredAsState()
     val borderColor by animateColorAsState(
         targetValue = when {
-            included -> Color(0xFF5D79A8)
-            hovered -> Color(0xFF627A9D)
-            else -> Color(0xFF9AA6B8)
+            included -> Color(0xFF4F46E5)
+            hovered -> Color(0xFF6366F1)
+            else -> Color(0xFFA5B4FC)
         },
         animationSpec = tween(durationMillis = 150),
         label = "checkboxBorder"
     )
     val backgroundColor by animateColorAsState(
         targetValue = when {
-            included -> Color(0xFFEAF0FA)
-            hovered -> Color(0x14314A87)
+            included -> Color(0xFFEEF2FF)
+            hovered -> Color(0x144F46E5)
             else -> Color.White
         },
         animationSpec = tween(durationMillis = 150),
@@ -1161,7 +1402,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
             // The default indication draws the chunky grey block seen in the old UI.
             .clickable(interactionSource = interactionSource, indication = null, enabled = onClick != null) { onClick?.invoke() },
         contentAlignment = Alignment.Center
-    ) { if (included) Text("✓", color = Color(0xFF315789), fontSize = 20.sp, fontWeight = FontWeight.Bold) }
+    ) { if (included) Text("✓", color = Color(0xFF4F46E5), fontSize = 20.sp, fontWeight = FontWeight.Bold) }
 }
 
 @Composable private fun DragTapIllustration(primaryBlue: Color) = Column(
@@ -2201,7 +2442,7 @@ private fun openPdfPreview(context: Context, uri: Uri) {
 
 @Composable private fun EditorCircle(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, large: Boolean = false, enabled: Boolean = true) {
     val size = if (large) 74.dp else 48.dp
-    val tint = if (enabled) Color(0xFF24519B) else Color(0xFFB8B8B8)
+    val tint = if (enabled) Color(0xFF4F46E5) else Color(0xFFB8B8B8)
     Surface(modifier = modifier.size(size), shape = CircleShape, color = Color.Transparent, border = BorderStroke(if (large) 3.dp else 2.dp, tint)) { Box(Modifier.fillMaxSize().clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) { Icon(icon, label, tint = tint, modifier = Modifier.size(if (large) 42.dp else 27.dp)) } }
 }
 
@@ -2209,9 +2450,14 @@ private fun openPdfPreview(context: Context, uri: Uri) {
     screens: List<ScreenEntity>,
     transitions: List<TransitionEntity>,
     flow: FlowEntity,
+    onDeleteScreen: (ScreenEntity) -> Unit,
+    onReplaceScreen: (ScreenEntity) -> Unit,
+    onUpdatePointer: (ScreenEntity, Float, Float) -> Unit,
+    onLightboxVisibilityChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val bitmaps = rememberScreenBitmaps(screens, maxDimension = 1600)
+    var selectedScreen by remember { mutableStateOf<ScreenEntity?>(null) }
     // One scrollable document, with five screenshots per row. The outer
     // editor owns scrolling; no diagram-page toggler is required.
     val columns = minOf(5, screens.size.coerceAtLeast(1))
@@ -2234,6 +2480,10 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                         bitmaps = bitmaps,
                         showMobileStencils = flow.showMobileStencils,
                         connectorColor = Color(flow.connectorColor.toInt()),
+                        onScreenClick = {
+                            selectedScreen = it
+                            onLightboxVisibilityChange(true)
+                        },
                         modifier = Modifier.fillMaxWidth().height(canvasHeight)
                     )
                 }
@@ -2258,6 +2508,408 @@ private fun openPdfPreview(context: Context, uri: Uri) {
             }
         }
     }
+    selectedScreen?.let { screen ->
+        val currentIndex = screens.indexOfFirst { it.id == screen.id }.coerceAtLeast(0)
+        ScreenshotLightbox(
+            screen = screen,
+            screenPosition = currentIndex,
+            screenCount = screens.size,
+            onDismiss = {
+                selectedScreen = null
+                onLightboxVisibilityChange(false)
+            },
+            onDelete = onDeleteScreen,
+            onReplace = onReplaceScreen,
+            onUpdatePointer = onUpdatePointer,
+            onSlide = { direction ->
+                screens.getOrNull(currentIndex + direction)?.let { selectedScreen = it }
+            }
+        )
+    }
+}
+
+/** Full-screen viewer for inspecting an individual screenshot without changing the diagram. */
+@Composable private fun ScreenshotLightbox(
+    screen: ScreenEntity,
+    screenPosition: Int,
+    screenCount: Int,
+    onDismiss: () -> Unit,
+    onDelete: (ScreenEntity) -> Unit,
+    onReplace: (ScreenEntity) -> Unit,
+    onUpdatePointer: (ScreenEntity, Float, Float) -> Unit,
+    onSlide: (Int) -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val hostActivity = context as? Activity
+    // The viewer owns a dark visual layer, including its system bars, until it
+    // is dismissed. The host's regular light appearance is restored afterward.
+    androidx.compose.runtime.DisposableEffect(hostActivity) {
+        val hostWindow = hostActivity?.window
+        val controller = hostWindow?.let { WindowCompat.getInsetsController(it, it.decorView) }
+        val previousLightStatusIcons = controller?.isAppearanceLightStatusBars
+        val previousLightNavigationIcons = controller?.isAppearanceLightNavigationBars
+        // Android 15 draws system bars edge-to-edge. The lightbox owns the
+        // visible dark system-bar backdrop in Compose, so no deprecated
+        // Window status/navigation-bar color mutation is necessary.
+        controller?.isAppearanceLightStatusBars = false
+        controller?.isAppearanceLightNavigationBars = false
+        onDispose {
+            if (previousLightStatusIcons != null) controller?.isAppearanceLightStatusBars = previousLightStatusIcons
+            if (previousLightNavigationIcons != null) controller?.isAppearanceLightNavigationBars = previousLightNavigationIcons
+        }
+    }
+    val bitmap = rememberScreenBitmaps(listOf(screen), maxDimension = 2400)[screen.id]
+    var visible by remember { mutableStateOf(false) }
+    var closeRequested by remember { mutableStateOf(false) }
+    var showDeleteConfirmation by remember { mutableStateOf(false) }
+    var editingPointer by remember(screen.id) { mutableStateOf(false) }
+    var pointerPosition by remember(screen.id) { mutableStateOf(Offset(screen.markerX, screen.markerY)) }
+    val backdropAlpha by animateFloatAsState(
+        targetValue = if (visible) 1f else 0f,
+        animationSpec = tween(180),
+        label = "lightboxBackdrop"
+    )
+    val imageScale by animateFloatAsState(
+        targetValue = if (visible) 1f else .94f,
+        animationSpec = tween(220),
+        label = "lightboxImage"
+    )
+    val requestClose = {
+        if (!closeRequested) closeRequested = true
+    }
+    androidx.compose.runtime.LaunchedEffect(Unit) { visible = true }
+    androidx.compose.runtime.LaunchedEffect(closeRequested) {
+        if (closeRequested) {
+            visible = false
+            delay(180)
+            onDismiss()
+        }
+    }
+    Dialog(
+        onDismissRequest = requestClose,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true
+        )
+    ) {
+        // Android 12+ can blur the activity window behind this dialog. Older
+        // versions retain the same focused dark scrim without the blur.
+        val dialogView = LocalView.current
+        SideEffect {
+            val window = (dialogView.parent as? DialogWindowProvider)?.window
+            // On Android 15 the status bar is edge-to-edge. Let this dialog
+            // render behind it so the lightbox backdrop, rather than the
+            // host screen's pale system-bar surface, fills that region.
+            window?.let { WindowCompat.setDecorFitsSystemWindows(it, false) }
+            window?.setDimAmount(.42f)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                window?.isNavigationBarContrastEnforced = false
+            }
+            window?.let {
+                WindowCompat.getInsetsController(it, dialogView).isAppearanceLightStatusBars = false
+                WindowCompat.getInsetsController(it, dialogView).isAppearanceLightNavigationBars = false
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                window?.setBackgroundBlurRadius(24)
+            }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer(alpha = backdropAlpha)
+                .background(Color(0xCC05070B))
+                .clickable(onClick = requestClose),
+            contentAlignment = Alignment.Center
+        ) {
+            // The preview owns the top system-bar area while it is open.
+            Box(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .windowInsetsTopHeight(WindowInsets.statusBars)
+                    .background(Color(0xFF1A1A1A))
+            )
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .fillMaxWidth(.90f)
+                    .fillMaxHeight(.64f)
+                    .offset(y = (-63).dp)
+                    .graphicsLayer(scaleX = imageScale, scaleY = imageScale)
+                    .clickable(onClick = {}),
+                color = Color.Black,
+                shape = RoundedCornerShape(20.dp),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = .12f)),
+                shadowElevation = 24.dp
+            ) {
+                val pointerDragModifier = if (editingPointer) {
+                    Modifier.pointerInput(screen.id) {
+                        detectDragGestures(
+                            onDragStart = { start ->
+                                pointerPosition = Offset(
+                                    (start.x / size.width).coerceIn(0f, 1f),
+                                    (start.y / size.height).coerceIn(0f, 1f)
+                                )
+                            }
+                        ) { change, dragAmount ->
+                            change.consume()
+                            pointerPosition = Offset(
+                                (pointerPosition.x + dragAmount.x / size.width).coerceIn(0f, 1f),
+                                (pointerPosition.y + dragAmount.y / size.height).coerceIn(0f, 1f)
+                            )
+                        }
+                    }
+                } else Modifier
+                val swipeModifier = if (!editingPointer && screenCount > 1) {
+                    Modifier.pointerInput(screen.id, screenCount) {
+                        var horizontalDrag = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { horizontalDrag = 0f },
+                            onHorizontalDrag = { change, dragAmount ->
+                                change.consume()
+                                horizontalDrag += dragAmount
+                            },
+                            onDragEnd = {
+                                if (kotlin.math.abs(horizontalDrag) >= 64f) {
+                                    // Left advances; right returns to the previous screenshot.
+                                    onSlide(if (horizontalDrag < 0f) 1 else -1)
+                                }
+                            }
+                        )
+                    }
+                } else Modifier
+                Box(Modifier.fillMaxSize().then(pointerDragModifier).then(swipeModifier)) {
+                    if (bitmap != null) {
+                        androidx.compose.foundation.Image(
+                            bitmap = bitmap,
+                            contentDescription = "Expanded screenshot",
+                            modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)),
+                            contentScale = ContentScale.Fit
+                        )
+                    } else {
+                        Text(
+                            "Screenshot unavailable",
+                            modifier = Modifier.align(Alignment.Center),
+                            color = Color.White,
+                            fontSize = 16.sp
+                        )
+                    }
+                    if (editingPointer) {
+                        Canvas(Modifier.fillMaxSize()) {
+                            val marker = Offset(size.width * pointerPosition.x, size.height * pointerPosition.y)
+                            // The positioning stencil makes the exact x/y location
+                            // readable while the user drags the connection pointer.
+                            drawLine(
+                                Color.White.copy(alpha = .45f),
+                                Offset(marker.x, 0f),
+                                Offset(marker.x, size.height),
+                                strokeWidth = 1.5f
+                            )
+                            drawLine(
+                                Color.White.copy(alpha = .45f),
+                                Offset(0f, marker.y),
+                                Offset(size.width, marker.y),
+                                strokeWidth = 1.5f
+                            )
+                            drawCircle(Color.Black.copy(alpha = .38f), 28f, marker)
+                            drawCircle(Color.White.copy(alpha = .9f), 21f, marker)
+                            drawCircle(Color(0xFF4F46E5), 12f, marker)
+                            drawCircle(Color.White, 4f, marker)
+                        }
+                        Surface(
+                            modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
+                            color = Color(0xD9111111),
+                            shape = RoundedCornerShape(18.dp)
+                        ) {
+                            Text(
+                                "Drag the marker to adjust the pointer",
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
+            }
+            if (!editingPointer) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 25.dp, end = 20.dp)
+                        .size(48.dp)
+                        .clickable(onClick = requestClose),
+                    shape = CircleShape,
+                    color = Color(0xE61A1A1A),
+                    border = BorderStroke(1.dp, Color(0xFF2A2A2A)),
+                    shadowElevation = 6.dp
+                ) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Cancel",
+                            tint = Color.White,
+                            modifier = Modifier.size(26.dp)
+                        )
+                    }
+                }
+            }
+            if (!editingPointer && screenCount > 1) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .offset(y = (-164).dp),
+                    color = Color(0xD9111111),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text(
+                        "Swipe to browse  •  ${screenPosition + 1} / $screenCount",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth(.84f)
+                    .height(84.dp)
+                    .offset(y = (-72).dp)
+                    .clickable(onClick = {}),
+                color = Color(0xFF1A1A1A),
+                shape = RoundedCornerShape(28.dp),
+                border = BorderStroke(1.dp, Color(0xFF2A2A2A)),
+                shadowElevation = 16.dp
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (editingPointer) {
+                        LightboxAction(Icons.Default.Close, "Cancel") {
+                            pointerPosition = Offset(screen.markerX, screen.markerY)
+                            editingPointer = false
+                        }
+                        LightboxAction(Icons.Default.Check, "Save") {
+                            onUpdatePointer(screen, pointerPosition.x, pointerPosition.y)
+                            editingPointer = false
+                        }
+                    } else {
+                    LightboxDrawableAction(R.drawable.ic_lightbox_share, "Share") {
+                        runCatching {
+                            val imageUri = FileProvider.getUriForFile(
+                                context,
+                                "${context.packageName}.fileprovider",
+                                java.io.File(screen.imagePath)
+                            )
+                            context.startActivity(
+                                Intent.createChooser(
+                                    Intent(Intent.ACTION_SEND)
+                                        .setType("image/png")
+                                        .putExtra(Intent.EXTRA_STREAM, imageUri)
+                                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                                    "Share screenshot"
+                                )
+                            )
+                        }.onFailure {
+                            android.widget.Toast.makeText(context, "Unable to share screenshot", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    LightboxDrawableAction(R.drawable.ic_lightbox_delete, "Delete", tint = Color.White) {
+                        showDeleteConfirmation = true
+                    }
+                    LightboxDrawableAction(R.drawable.ic_lightbox_replace, "Replace") {
+                        onReplace(screen)
+                        requestClose()
+                    }
+                    LightboxDrawableAction(R.drawable.ic_lightbox_edit, "Edit") {
+                        editingPointer = true
+                    }
+                    }
+                }
+            }
+        }
+    }
+    if (showDeleteConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirmation = false },
+            containerColor = Color.White,
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("⚠", color = Color(0xFFE8D372), fontSize = 32.sp)
+                    Spacer(Modifier.width(12.dp))
+                    Text("Deleting screenshot", color = Color(0xFF263F7D), fontWeight = FontWeight.Medium)
+                }
+            },
+            text = {
+                Text(
+                    "This screenshot will be permanently deleted. Are you sure you want to do this?",
+                    color = Color(0xFF222222),
+                    fontSize = 17.sp
+                )
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirmation = false }) {
+                    Text("CANCEL", color = Color(0xFF263F7D))
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDeleteConfirmation = false
+                    onDelete(screen)
+                    requestClose()
+                }) { Text("OK", color = Color(0xFF263F7D)) }
+            }
+        )
+    }
+}
+
+@Composable private fun LightboxAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    tint: Color = Color.White,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier.width(60.dp).height(64.dp).clickable(onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
+            Icon(icon, label, tint = Color.White, modifier = Modifier.size(25.dp))
+        }
+        Spacer(Modifier.height(5.dp))
+        Text(label, color = tint, fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = .1.sp)
+    }
+}
+
+/** Renders the action artwork supplied as SVGs, packaged as vector drawables. */
+@Composable private fun LightboxDrawableAction(
+    @androidx.annotation.DrawableRes iconRes: Int,
+    label: String,
+    tint: Color = Color.White,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier.width(60.dp).height(64.dp).clickable(onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
+            Icon(
+                painter = painterResource(iconRes),
+                contentDescription = label,
+                tint = Color.Unspecified,
+                modifier = Modifier.size(25.dp)
+            )
+        }
+        Spacer(Modifier.height(5.dp))
+        Text(label, color = tint, fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = .1.sp)
+    }
 }
 
 /** Draws screenshot nodes and the persisted marker-to-next-screen transitions. */
@@ -2267,8 +2919,57 @@ private fun openPdfPreview(context: Context, uri: Uri) {
     bitmaps: Map<String, androidx.compose.ui.graphics.ImageBitmap>,
     showMobileStencils: Boolean,
     connectorColor: Color,
+    columnsOverride: Int? = null,
+    onScreenClick: (ScreenEntity) -> Unit = {},
     modifier: Modifier = Modifier
-) = Canvas(modifier) {
+) = Canvas(
+    modifier.pointerInput(screens, bitmaps, columnsOverride) {
+        detectTapGestures { tap ->
+            if (screens.isEmpty()) return@detectTapGestures
+            val margin = 10.dp.toPx()
+            val gap = 8.dp.toPx()
+            val rowGap = 12.dp.toPx()
+            val aspectRatio = 2.15f
+            val columns = (columnsOverride ?: 5).coerceIn(1, screens.size)
+            val rows = (screens.size + columns - 1) / columns
+            val widthBound = (size.width - margin * 2 - gap * (columns - 1)) / columns
+            val heightBound = (size.height - margin * 2 - rowGap * (rows - 1)) / (rows * aspectRatio)
+            val nodeWidth = minOf(widthBound, heightBound).coerceAtLeast(1f)
+            val nodeHeight = nodeWidth * aspectRatio
+            val imageRects = screens.mapIndexed { index, screen ->
+                val row = index / columns
+                val column = index % columns
+                val itemsInThisRow = minOf(columns, screens.size - row * columns)
+                val rowWidth = itemsInThisRow * nodeWidth + (itemsInThisRow - 1) * gap
+                val slot = Offset(
+                    (size.width - rowWidth) / 2f + column * (nodeWidth + gap),
+                    margin + row * (nodeHeight + rowGap)
+                )
+                val image = bitmaps[screen.id]
+                if (image == null) {
+                    androidx.compose.ui.geometry.Rect(slot.x, slot.y, slot.x + nodeWidth, slot.y + nodeHeight)
+                } else {
+                    val imageAspect = image.width.toFloat() / image.height.toFloat()
+                    var width = nodeWidth
+                    var height = width / imageAspect
+                    if (height > nodeHeight) {
+                        height = nodeHeight
+                        width = height * imageAspect
+                    }
+                    androidx.compose.ui.geometry.Rect(
+                        slot.x + (nodeWidth - width) / 2f,
+                        slot.y + (nodeHeight - height) / 2f,
+                        slot.x + (nodeWidth + width) / 2f,
+                        slot.y + (nodeHeight + height) / 2f
+                    )
+                }
+            }
+            imageRects.indexOfFirst { it.contains(tap) }
+                .takeIf { it >= 0 }
+                ?.let { onScreenClick(screens[it]) }
+        }
+    }
+) {
     // All values are in pixels here. Convert dp explicitly to keep the canvas
     // geometry in sync with the Compose layout above on every screen density.
     val margin = 10.dp.toPx()
@@ -2278,14 +2979,17 @@ private fun openPdfPreview(context: Context, uri: Uri) {
     // Five columns match the vertically scrolling reference layout. Rows are
     // added below, rather than shrinking a whole diagram page or creating a
     // second page.
-    val columns = minOf(5, screens.size)
+    val columns = (columnsOverride ?: 5).coerceIn(1, screens.size)
     val rows = (screens.size + columns - 1) / columns
     val widthBound = (size.width - margin * 2 - gap * (columns - 1)) / columns
     val heightBound = (size.height - margin * 2 - rowGap * (rows - 1)) / (rows * aspectRatio)
     val nodeWidth = minOf(widthBound, heightBound).coerceAtLeast(1f)
     val nodeHeight = nodeWidth * aspectRatio
     val contentHeight = rows * nodeHeight + (rows - 1) * rowGap
-    val topInset = ((size.height - contentHeight) / 2f).coerceAtLeast(0f)
+    // The diagram is a vertically scrolling document. Centering a narrow
+    // five-column grid inside the fixed canvas left a large blank band above
+    // the first row; keep it anchored to the card's normal top padding.
+    val topInset = margin
     val positions = screens.mapIndexed { index, _ ->
         val row = index / columns
         val column = index % columns

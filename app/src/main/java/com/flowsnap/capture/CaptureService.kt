@@ -20,6 +20,7 @@ import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -30,6 +31,7 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.res.ResourcesCompat
+import com.flowsnap.MainActivity
 import com.flowsnap.R
 import com.flowsnap.data.ScreenshotStorage
 import kotlinx.coroutines.CoroutineScope
@@ -77,18 +79,50 @@ class CaptureService : Service() {
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
         @Suppress("DEPRECATION") val resultData = intent?.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
         if (flowId.isBlank() || resultData == null) { stopSelf(); return START_NOT_STICKY }
-        startNotification()
-        projection = getSystemService(MediaProjectionManager::class.java).getMediaProjection(resultCode, resultData)
-        projection.registerCallback(object : MediaProjection.Callback() { override fun onStop() = stopCapture() }, null)
-        val metrics = resources.displayMetrics
-        reader = ImageReader.newInstance(metrics.widthPixels, metrics.heightPixels, PixelFormat.RGBA_8888, 2)
-        virtualDisplay = projection.createVirtualDisplay("FlowSnap capture", metrics.widthPixels, metrics.heightPixels, metrics.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null)
+        // Android 15/16 applies stricter foreground-service and projection
+        // checks. Do all session setup in one guarded block so a rejected or
+        // expired consent token stops the service cleanly instead of crashing
+        // the app process.
+        val started = runCatching {
+            startNotification()
+            projection = getSystemService(MediaProjectionManager::class.java)
+                .getMediaProjection(resultCode, resultData)
+            projection.registerCallback(
+                object : MediaProjection.Callback() { override fun onStop() = stopCapture() },
+                mainHandler
+            )
+            val metrics = resources.displayMetrics
+            reader = ImageReader.newInstance(
+                metrics.widthPixels,
+                metrics.heightPixels,
+                PixelFormat.RGBA_8888,
+                2
+            )
+            virtualDisplay = projection.createVirtualDisplay(
+                "FlowSnap capture",
+                metrics.widthPixels,
+                metrics.heightPixels,
+                metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface,
+                null,
+                mainHandler
+            )
+        }.onFailure { error ->
+            Log.e("FlowSnapCapture", "Unable to start a MediaProjection session", error)
+            Toast.makeText(this, "Screen capture could not start. Please try again.", Toast.LENGTH_LONG).show()
+            stopCapture()
+        }.isSuccess
+        if (!started) return START_NOT_STICKY
         if (Settings.canDrawOverlays(this)) {
             showBubble()
             // Put FlowSnap in the background after its overlay has been attached.
             // The TYPE_APPLICATION_OVERLAY button remains above Home and other apps.
             openSystemHome()
-        } else openReview(null, 0f, 0f)
+        } else {
+            Toast.makeText(this, "Display over other apps permission is required to capture", Toast.LENGTH_LONG).show()
+            stopCapture()
+        }
         return START_NOT_STICKY
     }
 
@@ -126,11 +160,11 @@ class CaptureService : Service() {
         val outerRing = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
             setColor(android.graphics.Color.WHITE)
-            setStroke(density.toInt().coerceAtLeast(1), android.graphics.Color.rgb(36, 81, 155))
+            setStroke(density.toInt().coerceAtLeast(1), android.graphics.Color.rgb(79, 70, 229))
         }
         val blueCenter = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
-            setColor(android.graphics.Color.rgb(36, 81, 155))
+            setColor(android.graphics.Color.rgb(79, 70, 229))
         }
         bubble = TextView(this).apply {
             text = "Drag\n& tap"
@@ -144,6 +178,9 @@ class CaptureService : Service() {
             background = LayerDrawable(arrayOf(outerRing, blueCenter)).apply {
                 setLayerInset(1, innerInset, innerInset, innerInset, innerInset)
             }
+            // Keep the control visible above other apps without obscuring the
+            // content the user is about to capture.
+            alpha = 0.72f
             elevation = 12f
             setOnTouchListener(DragCaptureListener(params))
         }
@@ -274,26 +311,46 @@ class CaptureService : Service() {
         }
     }
 
-    private fun openReview(path: String?, markerX: Float, markerY: Float) {
-        // Delivery is decoupled from UI navigation: the activity owns routing the capture-ready event.
-        sendBroadcast(Intent(ACTION_CAPTURE_READY)
+    private fun openReview(path: String, markerX: Float, markerY: Float) {
+        // Deliver to an existing activity *and* explicitly bring its task back
+        // to the foreground. A dynamic receiver alone is unreliable after the
+        // app has been moved to Home: Android may have stopped or recreated the
+        // activity before the capture finishes.
+        val reviewIntent = Intent(ACTION_CAPTURE_READY)
             .setPackage(packageName)
             .putExtra(EXTRA_FLOW_ID, flowId)
             .putExtra(EXTRA_PATH, path)
             .putExtra(EXTRA_MARKER_X, markerX)
-            .putExtra(EXTRA_MARKER_Y, markerY))
-        // The transparent anchor is no longer needed after the launch request.
-        // Keep a reference to the *old* overlay.  A user can press Keep + Next
-        // before this delayed callback runs; in that case ACTION_RESUME has
-        // already created a new button.  Removing the mutable `bubble` field
-        // here used to remove that new button, leaving the next capture stuck.
+            .putExtra(EXTRA_MARKER_Y, markerY)
+        sendBroadcast(reviewIntent)
+        val launchSucceeded = runCatching {
+            startActivity(
+                Intent(this, MainActivity::class.java)
+                    .setAction(ACTION_CAPTURE_READY)
+                    .putExtras(reviewIntent)
+                    .addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    )
+            )
+        }.onFailure { error ->
+            Log.e("FlowSnapCapture", "Unable to open capture review", error)
+        }.isSuccess
+        if (!launchSucceeded) {
+            captureRequested = false
+            bubble?.alpha = 1f
+            Toast.makeText(this, "Capture saved, but review could not open. Try again.", Toast.LENGTH_LONG).show()
+            return
+        }
+        // The review task is now being opened, so remove the old capture
+        // control immediately. This prevents an invisible/old overlay from
+        // consuming the next tap or leaving the user on the previous screen.
         val reviewBubble = bubble
-        mainHandler.postDelayed({
-            if (bubble === reviewBubble) {
-                reviewBubble?.let { runCatching { windowManager.removeView(it) } }
-                bubble = null
-            }
-        }, 500)
+        if (bubble === reviewBubble) {
+            reviewBubble?.let { runCatching { windowManager.removeView(it) } }
+            bubble = null
+        }
     }
 
     private fun stopCapture() {
