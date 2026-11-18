@@ -1,0 +1,24 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Screenshot stack -->
+    <path android:pathData="M48,25 L74,25 Q79,25 79,30 L79,52"
+        android:fillColor="@android:color/transparent" android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="5" android:strokeLineCap="round" android:strokeLineJoin="round" />
+    <path android:pathData="M38,35 L70,35 Q75,35 75,40 L75,61"
+        android:fillColor="@android:color/transparent" android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="5" android:strokeLineCap="round" android:strokeLineJoin="round" />
+    <path android:pathData="M29,45 L63,45 Q69,45 69,51 L69,75 Q69,81 63,81 L34,81 Q28,81 28,75 L28,51 Q28,45 34,45 Z"
+        android:fillColor="@android:color/transparent" android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="5" android:strokeLineJoin="round" />
+    <!-- Clean six-blade camera shutter -->
+    <path android:fillColor="#FFFFFFFF" android:pathData="M48.5,53 L55,53 L60,62 L54,65 Z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M60,62 L63,67.2 L57.5,75 L52,71.5 Z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M57.5,75 L51.5,75 L46,66 L52,63 Z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M46,66 L43,60.8 L48.5,53 L54,56.5 Z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M48.5,53 L54.5,53 L60,62 L54,65 Z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M60,62 L63,67.2 L57.5,75 L52,71.5 Z" />
+    <path android:fillColor="#1558E9" android:pathData="M52.5,61 L56.2,63.2 L56.2,67.5 L52.5,69.7 L48.8,67.5 L48.8,63.2 Z" />
+</vector>
