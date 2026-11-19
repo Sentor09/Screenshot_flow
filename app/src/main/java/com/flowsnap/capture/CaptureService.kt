@@ -296,18 +296,18 @@ class CaptureService : Service() {
                 Bitmap.createBitmap(padded, 0, 0, width, height)
             }
             bitmap = captureBitmap
-            val output = ScreenshotStorage.newCaptureUri(this, flowId)
+            val output = ScreenshotStorage.newCaptureFile(this, flowId)
             try {
-                contentResolver.openOutputStream(output)?.use { stream ->
+                output.outputStream().use { stream ->
                     check(captureBitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
                         "PNG encoding failed"
                     }
-                } ?: error("Unable to open screenshot destination")
+                }
             } catch (error: Throwable) {
-                runCatching { ScreenshotStorage.delete(this, output.toString()) }
+                runCatching { ScreenshotStorage.delete(this, output.absolutePath) }
                 throw error
             }
-            return output.toString()
+            return output.absolutePath
         } finally {
             if (imageClosed.compareAndSet(false, true)) image.close()
             bitmap?.takeIf { !it.isRecycled }?.recycle()
