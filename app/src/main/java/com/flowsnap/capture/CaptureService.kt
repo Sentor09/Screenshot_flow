@@ -41,7 +41,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Owns exactly one user-approved MediaProjection session and its draggable capture control. */
@@ -126,6 +125,7 @@ class CaptureService : Service() {
         return START_NOT_STICKY
     }
 
+    @Suppress("InlinedApi") // The foreground-service type is an inlined flag and is safe on minSdk 26.
     private fun startNotification() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL_ID, "FlowSnap capture", NotificationManager.IMPORTANCE_LOW))
         val stop = PendingIntent.getService(this, 1, Intent(this, CaptureService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
@@ -167,7 +167,7 @@ class CaptureService : Service() {
             setColor(android.graphics.Color.rgb(79, 70, 229))
         }
         bubble = TextView(this).apply {
-            text = "Drag\n& tap"
+            text = getString(R.string.capture_bubble_label)
             textSize = 8f
             gravity = Gravity.CENTER
             textAlignment = View.TEXT_ALIGNMENT_CENTER
@@ -182,6 +182,7 @@ class CaptureService : Service() {
             // content the user is about to capture.
             alpha = 0.72f
             elevation = 12f
+            setOnClickListener { capture(params) }
             setOnTouchListener(DragCaptureListener(params))
         }
         windowManager.addView(bubble, params)
@@ -222,7 +223,10 @@ class CaptureService : Service() {
                 windowManager.updateViewLayout(v, params)
                 true
             }
-            MotionEvent.ACTION_UP -> { if (kotlin.math.abs(event.rawX - downX) < touchSlop && kotlin.math.abs(event.rawY - downY) < touchSlop) capture(params); true }
+            MotionEvent.ACTION_UP -> {
+                if (kotlin.math.abs(event.rawX - downX) < touchSlop && kotlin.math.abs(event.rawY - downY) < touchSlop) v.performClick()
+                true
+            }
             else -> false
         }
     }
@@ -292,18 +296,18 @@ class CaptureService : Service() {
                 Bitmap.createBitmap(padded, 0, 0, width, height)
             }
             bitmap = captureBitmap
-            val output = ScreenshotStorage.newCaptureFile(this, flowId)
+            val output = ScreenshotStorage.newCaptureUri(this, flowId)
             try {
-                FileOutputStream(output).use { stream ->
+                contentResolver.openOutputStream(output)?.use { stream ->
                     check(captureBitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
                         "PNG encoding failed"
                     }
-                }
+                } ?: error("Unable to open screenshot destination")
             } catch (error: Throwable) {
-                output.delete()
+                runCatching { ScreenshotStorage.delete(this, output.toString()) }
                 throw error
             }
-            return output.absolutePath
+            return output.toString()
         } finally {
             if (imageClosed.compareAndSet(false, true)) image.close()
             bitmap?.takeIf { !it.isRecycled }?.recycle()
