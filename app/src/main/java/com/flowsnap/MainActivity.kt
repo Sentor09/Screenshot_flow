@@ -62,6 +62,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
@@ -99,6 +100,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.SideEffect
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.Alignment
@@ -285,11 +290,13 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
         flow: FlowEntity,
         showMobileStencils: Boolean,
         connectorColor: Long,
+        preferredColumns: Int,
         onSaved: (FlowEntity) -> Unit
     ) = viewModelScope.launch {
         val updated = flow.copy(
             showMobileStencils = showMobileStencils,
             connectorColor = connectorColor,
+            preferredColumns = preferredColumns.coerceIn(1, 9),
             updatedAt = System.currentTimeMillis()
         )
         dao.updateFlow(updated)
@@ -302,20 +309,25 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
         markerY = review.markerY,
         now = System.currentTimeMillis()
     )
-    fun keepCapture(review: CaptureReview) = viewModelScope.launch { persistCapture(review) }
+    fun keepCapture(review: CaptureReview, onComplete: (Boolean) -> Unit) = viewModelScope.launch {
+        val saved = runCatching { persistCapture(review) }.getOrDefault(false)
+        if (!saved) ScreenshotStorage.delete(getApplication(), review.path)
+        onComplete(saved)
+    }
     fun keepCaptureAndOpenDiagram(review: CaptureReview, onSaved: (FlowEntity?) -> Unit) = viewModelScope.launch {
-        persistCapture(review)
-        onSaved(dao.flow(review.flowId))
+        val saved = runCatching { persistCapture(review) }.getOrDefault(false)
+        if (!saved) ScreenshotStorage.delete(getApplication(), review.path)
+        onSaved(if (saved) dao.flow(review.flowId) else null)
     }
     fun deleteFlow(flow: FlowEntity, onDeleted: () -> Unit) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
         // Commit the cascaded Room delete first. Any failed file deletes are removed by startup reconciliation.
         val paths = dao.deleteFlowAndGetImagePaths(flow.id)
-        paths.forEach { path -> runCatching { java.io.File(path).delete() } }
+        paths.forEach { path -> runCatching { ScreenshotStorage.delete(getApplication(), path) } }
         ScreenshotStorage.deleteFlowFolder(getApplication(), flow.id)
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { onDeleted() }
     }
     fun deleteScreen(screen: ScreenEntity, onDeleted: () -> Unit) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-        dao.deleteScreenAndGetImagePath(screen.id)?.let { path -> runCatching { java.io.File(path).delete() } }
+        dao.deleteScreenAndGetImagePath(screen.id)?.let { path -> runCatching { ScreenshotStorage.delete(getApplication(), path) } }
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { onDeleted() }
     }
     fun updateScreenPointer(screen: ScreenEntity, markerX: Float, markerY: Float, onSaved: () -> Unit) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -323,15 +335,18 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { onSaved() }
     }
     fun replaceScreenImage(screen: ScreenEntity, source: Uri, onComplete: (Boolean) -> Unit) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        var replacement: Uri? = null
         val result = runCatching {
-            val replacement = ScreenshotStorage.newCaptureFile(getApplication(), screen.flowId)
+            replacement = ScreenshotStorage.newCaptureUri(getApplication(), screen.flowId)
             getApplication<android.app.Application>().contentResolver.openInputStream(source)?.use { input ->
-                replacement.outputStream().use { output -> input.copyTo(output) }
+                getApplication<android.app.Application>().contentResolver.openOutputStream(replacement!!)?.use { output -> input.copyTo(output) }
+                    ?: error("Unable to open screenshot destination")
             } ?: error("Unable to read selected image")
-            dao.updateScreen(screen.copy(imagePath = replacement.absolutePath))
+            dao.updateScreen(screen.copy(imagePath = replacement.toString()))
             dao.touchFlow(screen.flowId, System.currentTimeMillis())
-            runCatching { java.io.File(screen.imagePath).delete() }
+            runCatching { ScreenshotStorage.delete(getApplication(), screen.imagePath) }
         }
+        if (result.isFailure) replacement?.let { ScreenshotStorage.delete(getApplication(), it.toString()) }
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { onComplete(result.isSuccess) }
     }
     fun screens(flowId: String) = dao.observeScreens(flowId)
@@ -531,6 +546,28 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                 SettingsActionRow("FlowSnap", trailing = { Text("Version 1.0", fontSize = 13.sp, color = Color(0xFF718096)) })
             }
 
+            SettingsSectionLabel("SUPPORT")
+            SettingsCard {
+                SettingsNavigationRow(
+                    title = "Help & feedback",
+                    subtitle = "Get help or share an idea"
+                ) {
+                    android.widget.Toast.makeText(context, "Help & feedback coming soon", android.widget.Toast.LENGTH_SHORT).show()
+                }
+                SettingsNavigationRow(
+                    title = "Privacy policy",
+                    subtitle = "How FlowSnap handles your data"
+                ) {
+                    android.widget.Toast.makeText(context, "Privacy policy coming soon", android.widget.Toast.LENGTH_SHORT).show()
+                }
+                SettingsNavigationRow(
+                    title = "Open-source licenses",
+                    subtitle = "Libraries used by FlowSnap"
+                ) {
+                    android.widget.Toast.makeText(context, "Open-source licenses coming soon", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+
             Button(
                 onClick = {
                     preferences.edit {
@@ -623,6 +660,24 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
         }
         Spacer(Modifier.width(10.dp))
         trailing()
+    }
+}
+
+@Composable private fun SettingsNavigationRow(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit
+) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF202B3B))
+            Spacer(Modifier.height(3.dp))
+            Text(subtitle, fontSize = 12.sp, color = Color(0xFF718096))
+        }
+        Text("›", fontSize = 26.sp, color = Color(0xFF94A3B8))
     }
 }
 
@@ -778,9 +833,13 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
     // final normalized location, rather than the original overlay location.
     val reviewedCapture = draggedMarker?.let { marker ->
         if (reviewCanvasSize.width > 0 && reviewCanvasSize.height > 0) {
+            val bounds = bitmap?.let {
+                fittedScreenshotBounds(reviewCanvasSize.width.toFloat(), reviewCanvasSize.height.toFloat(), it.width, it.height)
+            } ?: ScreenshotBounds(0f, 0f, reviewCanvasSize.width.toFloat(), reviewCanvasSize.height.toFloat())
+            val (markerX, markerY) = bounds.normalize(marker.x, marker.y)
             review.copy(
-                markerX = (marker.x / reviewCanvasSize.width).coerceIn(0f, 1f),
-                markerY = (marker.y / reviewCanvasSize.height).coerceIn(0f, 1f)
+                markerX = markerX,
+                markerY = markerY
             )
         } else review
     } ?: review
@@ -820,8 +879,20 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                     Box(Modifier.fillMaxWidth().weight(1f).padding(12.dp)) {
                         Box(Modifier.fillMaxSize().clip(RoundedCornerShape(18.dp)).background(Color(0xFFE9EEF5))) {
                             if (bitmap != null) androidx.compose.foundation.Image(bitmap, "Captured screen", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-                            Canvas(Modifier.fillMaxSize().onSizeChanged { reviewCanvasSize = it }.pointerInput(Unit) { detectDragGestures(onDragStart = { draggedMarker = it }) { change, amount -> change.consume(); draggedMarker = (draggedMarker ?: change.position) + amount } }) {
-                                val marker = draggedMarker ?: Offset(size.width * review.markerX, size.height * review.markerY)
+                            Canvas(Modifier.fillMaxSize().onSizeChanged { reviewCanvasSize = it }.pointerInput(bitmap) { detectDragGestures(onDragStart = { draggedMarker = it }) { change, amount ->
+                                change.consume()
+                                val bounds = bitmap?.let { fittedScreenshotBounds(size.width.toFloat(), size.height.toFloat(), it.width, it.height) }
+                                    ?: ScreenshotBounds(0f, 0f, size.width.toFloat(), size.height.toFloat())
+                                val moved = (draggedMarker ?: change.position) + amount
+                                draggedMarker = Offset(
+                                    moved.x.coerceIn(bounds.left, bounds.left + bounds.width),
+                                    moved.y.coerceIn(bounds.top, bounds.top + bounds.height)
+                                )
+                            } }) {
+                                val bounds = bitmap?.let { fittedScreenshotBounds(size.width, size.height, it.width, it.height) }
+                                    ?: ScreenshotBounds(0f, 0f, size.width, size.height)
+                                val (markerX, markerY) = bounds.pointFor(review.markerX, review.markerY)
+                                val marker = draggedMarker ?: Offset(markerX, markerY)
                                 // Keep the transition marker deliberately minimal: no label or coloured halo.
                                 drawCircle(Color.White, 26f, marker)
                                 drawCircle(Color(0xFF4D4D4D), 9f, marker)
@@ -845,14 +916,19 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                 OutlinedButton(
-                    onClick = { java.io.File(review.path).delete(); returnToCapturedApp() },
+                    onClick = { ScreenshotStorage.delete(context, review.path); returnToCapturedApp() },
                     modifier = Modifier.weight(.84f).height(54.dp),
                     shape = RoundedCornerShape(16.dp),
                     border = BorderStroke(1.5.dp, Color(0xFFB3261E)),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB3261E))
                 ) { Text("DISCARD", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                 Button(
-                    onClick = { vm.keepCapture(reviewedCapture); returnToCapturedApp() },
+                    onClick = {
+                        vm.keepCapture(reviewedCapture) { saved ->
+                            if (saved) returnToCapturedApp()
+                            else android.widget.Toast.makeText(context, "This diagram was deleted; the capture was discarded", android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    },
                     modifier = Modifier.weight(1f).height(54.dp),
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = Color.White)
@@ -897,6 +973,7 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
     var captureLaunchInProgress by remember { mutableStateOf(false) }
     var resumeCaptureAfterOverlayGrant by rememberSaveable { mutableStateOf(false) }
     var launchCaptureAfterNotificationRequest by rememberSaveable { mutableStateOf(false) }
+    var launchCaptureAfterFolderSelection by rememberSaveable { mutableStateOf(false) }
     var exportJpegAfterPermission by rememberSaveable { mutableStateOf(false) }
     var exportPngAfterPermission by rememberSaveable { mutableStateOf(false) }
     var exportSketchAfterPermission by rememberSaveable { mutableStateOf(false) }
@@ -1004,6 +1081,25 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
             } else projectionManager.createScreenCaptureIntent()
         )
     }
+    val screenshotFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri == null) {
+            launchCaptureAfterFolderSelection = false
+            android.widget.Toast.makeText(context, "Choose a folder to save screenshots", android.widget.Toast.LENGTH_LONG).show()
+        } else {
+            runCatching { ScreenshotStorage.saveCaptureDestination(context, uri) }
+                .onSuccess { launchCaptureAfterFolderSelection = true }
+                .onFailure { error ->
+                    launchCaptureAfterFolderSelection = false
+                    android.widget.Toast.makeText(context, "Unable to use that folder: ${error.message ?: "unknown error"}", android.widget.Toast.LENGTH_LONG).show()
+                }
+        }
+    }
+    androidx.compose.runtime.LaunchedEffect(launchCaptureAfterFolderSelection) {
+        if (launchCaptureAfterFolderSelection) {
+            launchCaptureAfterFolderSelection = false
+            launchProjection()
+        }
+    }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         // Foreground capture remains available when the user declines; Android still requires the service notification.
         launchCaptureAfterNotificationRequest = true
@@ -1032,6 +1128,10 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
     val beginCapture = {
         when {
             captureLaunchInProgress -> Unit
+            !ScreenshotStorage.hasCaptureDestination(context) -> {
+                launchCaptureAfterFolderSelection = true
+                screenshotFolderPicker.launch(null)
+            }
             !Settings.canDrawOverlays(context) -> {
                 // Do not launch projection consent until the user has returned
                 // from overlay permission settings. Launching both at once can
@@ -1082,7 +1182,7 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
             EditorCircle(Icons.Default.Save, "Save", onClick = {
                 showExportFormats = true
             }, enabled = hasScreens)
-            EditorCircle(Icons.Default.CloudUpload, "Export PDF", onClick = { exportPdf.launch("${flow.name}.pdf") }, enabled = hasScreens)
+            EditorCircle(Icons.Default.CloudUpload, "Export PDF", onClick = { exportPdf.launch(exportFileName(flow.name, "pdf")) }, enabled = hasScreens)
             EditorCircle(Icons.Default.Delete, "Delete diagram", onClick = { showDeleteConfirmation = true })
         }
         Column(Modifier.align(Alignment.BottomEnd).padding(22.dp), verticalArrangement = Arrangement.spacedBy(18.dp), horizontalAlignment = Alignment.End) {
@@ -1093,9 +1193,9 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
         DiagramSettingsDialog(
             flow = flow,
             onDismiss = { showDiagramSettings = false },
-            onSave = { title, version, createdBy, showTitle, showVersion, showCreatedAt, showCreatedBy, showAppVersion, showMobileStencils, connectorColor ->
+            onSave = { title, version, createdBy, showTitle, showVersion, showCreatedAt, showCreatedBy, showAppVersion, showMobileStencils, connectorColor, preferredColumns ->
                     vm.updateFlowMetadata(flow, title, version, createdBy, showTitle, showVersion, showCreatedAt, showCreatedBy, showAppVersion) { savedFlow ->
-                    vm.updateDiagramAppearance(savedFlow, showMobileStencils, connectorColor) { showDiagramSettings = false }
+                    vm.updateDiagramAppearance(savedFlow, showMobileStencils, connectorColor, preferredColumns) { showDiagramSettings = false }
                 }
             }
         )
@@ -1105,7 +1205,7 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
             onDismiss = { showExportFormats = false },
             onExportPdf = {
                 showExportFormats = false
-                exportPdf.launch("${flow.name}.pdf")
+                exportPdf.launch(exportFileName(flow.name, "pdf"))
             },
             onExportJpeg = {
                 showExportFormats = false
@@ -1342,7 +1442,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 @Composable private fun DiagramSettingsDialog(
     flow: FlowEntity,
     onDismiss: () -> Unit,
-    onSave: (title: String, version: String, createdBy: String, showTitle: Boolean, showVersion: Boolean, showCreatedAt: Boolean, showCreatedBy: Boolean, showAppVersion: Boolean, showMobileStencils: Boolean, connectorColor: Long) -> Unit
+    onSave: (title: String, version: String, createdBy: String, showTitle: Boolean, showVersion: Boolean, showCreatedAt: Boolean, showCreatedBy: Boolean, showAppVersion: Boolean, showMobileStencils: Boolean, connectorColor: Long, preferredColumns: Int) -> Unit
 ) {
     var title by remember(flow.id) { mutableStateOf(flow.name) }
     var version by remember(flow.id) { mutableStateOf(flow.diagramVersion) }
@@ -1354,6 +1454,8 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     var showAppVersion by remember(flow.id) { mutableStateOf(flow.showAppVersion) }
     var showMobileStencils by remember(flow.id) { mutableStateOf(flow.showMobileStencils) }
     var connectorColor by remember(flow.id) { mutableLongStateOf(flow.connectorColor) }
+    var preferredColumns by remember(flow.id) { mutableStateOf(flow.preferredColumns.coerceIn(1, 9)) }
+    var appearancePage by remember(flow.id) { mutableStateOf(false) }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         // Keep the canvas visible without the heavy, muddy system dim overlay.
         val dialogView = LocalView.current
@@ -1370,41 +1472,152 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
             shadowElevation = 12.dp
         ) {
             Column(Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
-                Text("DIAGRAM LABELS", color = Color(0xFF1F2D43), fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                Text("DIAGRAM SETTINGS", color = Color(0xFF1F2D43), fontSize = 21.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFE3E7EF)))
                 Spacer(Modifier.height(10.dp))
-                EditableDiagramSetting("Title", title, { title = it }, showTitle) { showTitle = !showTitle }
-                EditableDiagramSetting("Diagram Version", version, { version = it }, showVersion) { showVersion = !showVersion }
-                ReadOnlyDiagramSetting("Created At", java.text.SimpleDateFormat("yyyy MMM dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(flow.createdAt)), showCreatedAt) { showCreatedAt = !showCreatedAt }
-                EditableDiagramSetting("Created By", createdBy, { createdBy = it }, showCreatedBy) { showCreatedBy = !showCreatedBy }
-                ReadOnlyDiagramSetting("App Version", "v1.0", showAppVersion) { showAppVersion = !showAppVersion }
-
-                Spacer(Modifier.height(2.dp))
-                Text("DIAGRAM LOOK & FEEL", color = Color(0xFF1F2D43), fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(6.dp))
-                Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFE3E7EF)))
-        Spacer(Modifier.height(5.dp))
-                AppearanceToggle(
-                    checked = showMobileStencils,
-                    onCheckedChange = { showMobileStencils = it }
-                )
-        Spacer(Modifier.height(5.dp))
-                ConnectorColorSetting(
-                    selectedColor = connectorColor,
-                    onColorSelected = { connectorColor = it }
-                )
+                Row(
+                    Modifier.fillMaxWidth().background(Color(0xFFF1F3F8), RoundedCornerShape(12.dp)).padding(3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    DiagramSettingsTab("LABELS", selected = !appearancePage, onClick = { appearancePage = false }, modifier = Modifier.weight(1f))
+                    DiagramSettingsTab("LOOK & FEEL", selected = appearancePage, onClick = { appearancePage = true }, modifier = Modifier.weight(1f))
+                }
+                Spacer(Modifier.height(12.dp))
+                AnimatedContent(
+                    targetState = appearancePage,
+                    modifier = Modifier.fillMaxWidth().pointerInput(appearancePage) {
+                        var horizontalDrag = 0f
+                        detectHorizontalDragGestures(
+                            onHorizontalDrag = { _, dragAmount -> horizontalDrag += dragAmount },
+                            onDragCancel = { horizontalDrag = 0f },
+                            onDragEnd = {
+                                when {
+                                    horizontalDrag < -72f && !appearancePage -> appearancePage = true
+                                    horizontalDrag > 72f && appearancePage -> appearancePage = false
+                                }
+                                horizontalDrag = 0f
+                            }
+                        )
+                    },
+                    transitionSpec = {
+                        val direction = if (targetState) 1 else -1
+                        slideInHorizontally { direction * it } togetherWith slideOutHorizontally { -direction * it }
+                    },
+                    label = "diagramSettingsSlide"
+                ) { showAppearance ->
+                    if (showAppearance) {
+                        DiagramAppearancePage(
+                            showMobileStencils = showMobileStencils,
+                            onShowMobileStencilsChange = { showMobileStencils = it },
+                            preferredColumns = preferredColumns,
+                            onPreferredColumnsChange = { preferredColumns = it },
+                            connectorColor = connectorColor,
+                            onConnectorColorChange = { connectorColor = it }
+                        )
+                    } else {
+                        Column(Modifier.fillMaxWidth()) {
+                            EditableDiagramSetting("Title", title, { title = it }, showTitle) { showTitle = !showTitle }
+                            EditableDiagramSetting("Diagram Version", version, { version = it }, showVersion) { showVersion = !showVersion }
+                            ReadOnlyDiagramSetting("Created At", java.text.SimpleDateFormat("yyyy MMM dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(flow.createdAt)), showCreatedAt) { showCreatedAt = !showCreatedAt }
+                            EditableDiagramSetting("Created By", createdBy, { createdBy = it }, showCreatedBy) { showCreatedBy = !showCreatedBy }
+                            ReadOnlyDiagramSetting("App Version", "v1.0", showAppVersion) { showAppVersion = !showAppVersion }
+                        }
+                    }
+                }
                 Spacer(Modifier.height(20.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = onDismiss, modifier = Modifier.padding(end = 14.dp)) {
                         Text("CANCEL", color = Color(0xFF5E6F8E), fontWeight = FontWeight.SemiBold)
                     }
-                    TextButton(onClick = { onSave(title, version, createdBy, showTitle, showVersion, showCreatedAt, showCreatedBy, showAppVersion, showMobileStencils, connectorColor) }) {
+                    TextButton(onClick = { onSave(title, version, createdBy, showTitle, showVersion, showCreatedAt, showCreatedBy, showAppVersion, showMobileStencils, connectorColor, preferredColumns) }) {
                         Text("SAVE", color = Color(0xFF4F46E5), fontWeight = FontWeight.Bold)
                     }
                 }
             }
         }
+    }
+}
+
+@Composable private fun DiagramSettingsTab(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier.height(34.dp).clip(RoundedCornerShape(9.dp))
+            .background(if (selected) Color.White else Color.Transparent)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (selected) Color(0xFF4F46E5) else Color(0xFF64748B))
+    }
+}
+
+@Composable private fun DiagramAppearancePage(
+    showMobileStencils: Boolean,
+    onShowMobileStencilsChange: (Boolean) -> Unit,
+    preferredColumns: Int,
+    onPreferredColumnsChange: (Int) -> Unit,
+    connectorColor: Long,
+    onConnectorColorChange: (Long) -> Unit
+) {
+    Column(
+        Modifier.fillMaxWidth()
+            .background(Color(0xFFF8FAFC), RoundedCornerShape(14.dp))
+            .border(1.dp, Color(0xFFE3E7EF), RoundedCornerShape(14.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+    ) {
+        AppearanceToggle(showMobileStencils, onShowMobileStencilsChange)
+        LookAndFeelDivider()
+        DiagramColumnsSetting(preferredColumns, onPreferredColumnsChange)
+        LookAndFeelDivider()
+        ConnectorColorSetting(connectorColor, onConnectorColorChange)
+    }
+}
+
+@Composable private fun LookAndFeelDivider() {
+    Box(
+        Modifier.fillMaxWidth().padding(vertical = 9.dp)
+            .height(1.dp).background(Color(0xFFE3E7EF))
+    )
+}
+
+@Composable private fun DiagramColumnsSetting(columns: Int, onColumnsChange: (Int) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().height(40.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier.size(36.dp)
+                .background(Color(0xFFF1F3FF), RoundedCornerShape(10.dp))
+                .border(1.5.dp, Color(0xFF4F46E5), RoundedCornerShape(10.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Apps,
+                contentDescription = "Diagram columns",
+                tint = Color(0xFF4F46E5),
+                modifier = Modifier.size(21.dp)
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text("Number of columns", color = Color(0xFF202B3B), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(Modifier.width(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            DiagramColumnStepButton("−", enabled = columns > 1) { onColumnsChange(columns - 1) }
+            Text(columns.toString(), modifier = Modifier.width(26.dp), textAlign = TextAlign.Center, color = Color(0xFF202B3B), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            DiagramColumnStepButton("+", enabled = columns < 9) { onColumnsChange(columns + 1) }
+        }
+    }
+}
+
+@Composable private fun DiagramColumnStepButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier.size(30.dp).background(if (enabled) Color(0xFFF5F6FF) else Color.Transparent, CircleShape)
+            .border(1.5.dp, if (enabled) Color(0xFF4F46E5) else Color(0xFFBFC8D8), CircleShape)
+            .clip(CircleShape).clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, color = if (enabled) Color(0xFF4F46E5) else Color(0xFFBFC8D8), fontSize = 20.sp, lineHeight = 20.sp)
     }
 }
 
@@ -1468,9 +1681,10 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 
 /** Controls whether the transition path and the saved tap marker are visible. */
 @Composable private fun AppearanceToggle(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(
             Modifier.size(36.dp)
+                .background(Color(0xFFF1F3FF), RoundedCornerShape(10.dp))
                 .border(1.5.dp, Color(0xFF4F46E5), RoundedCornerShape(10.dp)),
             contentAlignment = Alignment.Center
         ) {
@@ -1484,7 +1698,6 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             Text("Show mobile stencils", color = Color(0xFF202B3B), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text("Show connection lines and pointers", color = Color(0xFF63728A), fontSize = 11.sp)
         }
         IncludedMark(checked) { onCheckedChange(!checked) }
     }
@@ -1503,22 +1716,25 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
         0xFFE91E63L to "Pink"
     )
     Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(36.dp).background(Color(selectedColor.toInt()), CircleShape))
+        Row(Modifier.height(40.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(36.dp).background(Color(selectedColor.toInt()), RoundedCornerShape(10.dp))
+                    .border(1.dp, Color(0x22000000), RoundedCornerShape(10.dp))
+            )
             Spacer(Modifier.width(10.dp))
             Column {
                 Text("Color of arrows", color = Color(0xFF202B3B), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 Text("#%06X".format(selectedColor and 0xFFFFFF), color = Color(0xFF63728A), fontSize = 11.sp)
             }
         }
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(10.dp))
         // Eight compact swatches fit in one horizontal line, leaving room for
         // the dialog actions at the bottom on normal phone screens.
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             colors.forEach { (color, _) ->
                 val selected = color == selectedColor
                 Box(
-                    Modifier.size(25.dp)
+                    Modifier.size(27.dp)
                         .background(Color(color.toInt()), CircleShape)
                         .border(if (selected) 2.5.dp else 1.dp, if (selected) Color(0xFF1F2D43) else Color(0xFFD2D8E2), CircleShape)
                         .clickable { onColorSelected(color) },
@@ -1605,10 +1821,14 @@ private fun Modifier.diagramGrid() = this.drawBehind {
 private const val EDITABLE_EXPORT_IMAGE_WIDTH = 720
 private const val EDITABLE_EXPORT_IMAGE_HEIGHT = 1600
 
-private fun decodeExportBitmap(path: String, maxWidth: Int, maxHeight: Int): android.graphics.Bitmap? {
+/** A stable, filesystem-safe export name without timestamps or generated IDs. */
+private fun exportFileName(flowName: String, extension: String): String =
+    flowName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "flowsnap" } + ".${extension.trimStart('.')}"
+
+private fun decodeExportBitmap(context: Context, path: String, maxWidth: Int, maxHeight: Int): android.graphics.Bitmap? {
     if (maxWidth <= 0 || maxHeight <= 0) return null
     val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    android.graphics.BitmapFactory.decodeFile(path, bounds)
+    decodeBitmap(context, path, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
 
     var sampleSize = 1
@@ -1618,13 +1838,10 @@ private fun decodeExportBitmap(path: String, maxWidth: Int, maxHeight: Int): and
     ) {
         sampleSize *= 2
     }
-    val decoded = android.graphics.BitmapFactory.decodeFile(
-        path,
-        android.graphics.BitmapFactory.Options().apply {
+    val decoded = decodeBitmap(context, path, android.graphics.BitmapFactory.Options().apply {
             inSampleSize = sampleSize
             inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
-        }
-    ) ?: return null
+        }) ?: return null
     if (decoded.width <= maxWidth && decoded.height <= maxHeight) return decoded
 
     val scale = minOf(maxWidth.toFloat() / decoded.width, maxHeight.toFloat() / decoded.height)
@@ -1635,6 +1852,11 @@ private fun decodeExportBitmap(path: String, maxWidth: Int, maxHeight: Int): and
     decoded.recycle()
     return scaled
 }
+
+private fun decodeBitmap(context: Context, location: String, options: android.graphics.BitmapFactory.Options): android.graphics.Bitmap? =
+    if (location.startsWith("content://")) {
+        context.contentResolver.openInputStream(Uri.parse(location))?.use { android.graphics.BitmapFactory.decodeStream(it, null, options) }
+    } else android.graphics.BitmapFactory.decodeFile(location, options)
 
 /** Writes the same paged 7 x 4 flow arrangement to a user-selected PDF file. */
 private fun writeFlowPdf(
@@ -1656,7 +1878,7 @@ private fun writeFlowPdf(
                 val canvas = page.canvas
                 val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
                 canvas.drawColor(android.graphics.Color.WHITE)
-                val columns = minOf(7, pageScreens.size)
+                val columns = flow.preferredColumns.coerceIn(1, pageScreens.size)
                 val rows = (pageScreens.size + columns - 1) / columns
                 val margin = 48f
                 val metadataHeight = 132f
@@ -1686,7 +1908,7 @@ private fun writeFlowPdf(
                     val target = positions[index]
                     // Keep multiple source pixels per PDF pixel. PdfDocument can
                     // then downsample smoothly instead of embedding a tiny preview.
-                    decodeExportBitmap(screen.imagePath, (target.width() * 3).toInt(), (target.height() * 3).toInt())?.let { bitmap ->
+                    decodeExportBitmap(context, screen.imagePath, (target.width() * 3).toInt(), (target.height() * 3).toInt())?.let { bitmap ->
                         val scale = minOf(target.width() / bitmap.width, target.height() / bitmap.height)
                         val width = bitmap.width * scale
                         val height = bitmap.height * scale
@@ -1727,7 +1949,7 @@ private fun writeFlowJpeg(
     flow: FlowEntity
 ): Result<Uri> = runCatching {
     require(screens.isNotEmpty()) { "The diagram has no screenshots" }
-    val columns = minOf(5, screens.size)
+    val columns = flow.preferredColumns.coerceIn(1, screens.size)
     val rows = (screens.size + columns - 1) / columns
     val baseWidth = 2400f
     val margin = 96f
@@ -1757,7 +1979,7 @@ private fun writeFlowJpeg(
         val imagePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG)
         screens.forEachIndexed { index, screen ->
             val target = positions[index]
-            decodeExportBitmap(screen.imagePath, (target.width() * 2).toInt(), (target.height() * 2).toInt())?.let { source ->
+            decodeExportBitmap(context, screen.imagePath, (target.width() * 2).toInt(), (target.height() * 2).toInt())?.let { source ->
                 val factor = minOf(target.width() / source.width, target.height() / source.height)
                 val imageWidth = source.width * factor
                 val imageHeight = source.height * factor
@@ -1773,7 +1995,7 @@ private fun writeFlowJpeg(
             drawPdfTransition(canvas, positions[fromIndex], positions[toIndex], edge.fromMarkerX, edge.fromMarkerY, fromIndex / columns == toIndex / columns, flow.connectorColor.toInt())
         }
         val resolver = context.contentResolver
-        val displayName = flow.name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "flowsnap" } + ".jpg"
+        val displayName = exportFileName(flow.name, "jpg")
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -1813,7 +2035,7 @@ private fun writeFlowPng(
     flow: FlowEntity
 ): Result<Uri> = runCatching {
     require(screens.isNotEmpty()) { "The diagram has no screenshots" }
-    val columns = minOf(5, screens.size)
+    val columns = flow.preferredColumns.coerceIn(1, screens.size)
     val rows = (screens.size + columns - 1) / columns
     val baseWidth = 2400f
     val margin = 96f
@@ -1842,7 +2064,7 @@ private fun writeFlowPng(
         val imagePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG)
         screens.forEachIndexed { index, screen ->
             val target = positions[index]
-            decodeExportBitmap(screen.imagePath, (target.width() * 2).toInt(), (target.height() * 2).toInt())?.let { source ->
+            decodeExportBitmap(context, screen.imagePath, (target.width() * 2).toInt(), (target.height() * 2).toInt())?.let { source ->
                 val factor = minOf(target.width() / source.width, target.height() / source.height)
                 val imageWidth = source.width * factor
                 val imageHeight = source.height * factor
@@ -1859,7 +2081,7 @@ private fun writeFlowPng(
         }
 
         val resolver = context.contentResolver
-        val displayName = flow.name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "flowsnap" } + ".png"
+        val displayName = exportFileName(flow.name, "png")
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
             put(MediaStore.Images.Media.MIME_TYPE, "image/png")
@@ -1899,7 +2121,7 @@ private fun writeFlowDrawio(
     flow: FlowEntity
 ): Result<Uri> = runCatching {
     require(screens.isNotEmpty()) { "The diagram has no screenshots" }
-    val columns = minOf(5, screens.size)
+    val columns = flow.preferredColumns.coerceIn(1, screens.size)
     val margin = 40f
     val gap = 28f
     val nodeWidth = 300f
@@ -1937,7 +2159,7 @@ private fun writeFlowDrawio(
             writer.write("      <root><mxCell id=\"0\"/><mxCell id=\"1\" parent=\"0\"/>\n")
             val writtenScreens = mutableSetOf<Int>()
             screens.forEachIndexed { index, screen ->
-                val imageBase64 = screenshotPngBase64(screen.imagePath) ?: return@forEachIndexed
+                val imageBase64 = screenshotPngBase64(context, screen.imagePath) ?: return@forEachIndexed
                 val row = index / columns
                 val column = index % columns
                 // A PNG data URI uses only XML-attribute-safe Base64 characters.
@@ -1985,7 +2207,7 @@ private fun writeFlowSvg(
     flow: FlowEntity
 ): Result<Uri> = runCatching {
     require(screens.isNotEmpty()) { "The diagram has no screenshots" }
-    val columns = minOf(5, screens.size)
+    val columns = flow.preferredColumns.coerceIn(1, screens.size)
     val margin = 40.0
     val gap = 28.0
     val nodeWidth = 300.0
@@ -2006,7 +2228,7 @@ private fun writeFlowSvg(
     val screenIndex = screens.withIndex().associate { it.value.id to it.index }
     val connectorColor = String.format(java.util.Locale.US, "#%06X", flow.connectorColor and 0xFFFFFF)
     val resolver = context.contentResolver
-    val displayName = flow.name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "flowsnap" } + "-${System.currentTimeMillis()}.svg"
+    val displayName = exportFileName(flow.name, "svg")
     val values = ContentValues().apply {
         put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
         put(MediaStore.MediaColumns.MIME_TYPE, "image/svg+xml")
@@ -2029,7 +2251,7 @@ private fun writeFlowSvg(
             // Write and release one compact image at a time instead of retaining
             // a whole diagram worth of Base64 strings in memory.
             screens.forEachIndexed { index, screen ->
-                val imageBase64 = screenshotPngBase64(screen.imagePath) ?: return@forEachIndexed
+                val imageBase64 = screenshotPngBase64(context, screen.imagePath) ?: return@forEachIndexed
                 val rect = positions[index]
                 // Base64 output contains no quote, ampersand, or angle bracket,
                 // so it can be streamed directly without a second full-size copy.
@@ -2083,10 +2305,10 @@ private fun writeFlowSvg(
 }
 
 /** Encodes the compact preview used by Draw.io/SVG without Base64 line wraps. */
-private fun screenshotPngBase64(path: String): String? = runCatching {
+private fun screenshotPngBase64(context: Context, path: String): String? = runCatching {
     // Keep a 2.4x asset for the 300px SVG/Draw.io node: it stays crisp in Figma
     // when zoomed or enlarged without retaining full device-resolution captures.
-    val bitmap = decodeExportBitmap(path, EDITABLE_EXPORT_IMAGE_WIDTH, EDITABLE_EXPORT_IMAGE_HEIGHT) ?: return@runCatching null
+    val bitmap = decodeExportBitmap(context, path, EDITABLE_EXPORT_IMAGE_WIDTH, EDITABLE_EXPORT_IMAGE_HEIGHT) ?: return@runCatching null
     try {
         val bytes = java.io.ByteArrayOutputStream().use { output ->
             check(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output)) { "Unable to encode screenshot PNG" }
@@ -2107,11 +2329,11 @@ private fun xmlEscape(value: String): String = buildString(value.length) {
     }
 }
 
-private data class SketchImageAsset(val index: Int, val screen: ScreenEntity, val id: String, val file: java.io.File)
+private data class SketchImageAsset(val index: Int, val screen: ScreenEntity, val id: String, val location: String)
 
 /** Re-encode to a conventional PNG so the asset is readable by Sketch/Figma. */
-private fun sketchPngBytes(file: java.io.File): ByteArray? =
-    decodeExportBitmap(file.absolutePath, EDITABLE_EXPORT_IMAGE_WIDTH, EDITABLE_EXPORT_IMAGE_HEIGHT)?.let { bitmap ->
+private fun sketchPngBytes(context: Context, location: String): ByteArray? =
+    decodeExportBitmap(context, location, EDITABLE_EXPORT_IMAGE_WIDTH, EDITABLE_EXPORT_IMAGE_HEIGHT)?.let { bitmap ->
         try {
             java.io.ByteArrayOutputStream().use { output ->
                 check(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output)) {
@@ -2140,10 +2362,8 @@ private fun writeFlowSketch(
 ): Result<Uri> = runCatching {
     require(screens.isNotEmpty()) { "The diagram has no screenshots" }
     val assets = screens.mapIndexedNotNull { index, screen ->
-        java.io.File(screen.imagePath).takeIf { it.isFile }?.let { file ->
-            sketchPngBytes(file)?.let { pngBytes ->
-                SketchImageAsset(index, screen, sketchImageId(pngBytes), file)
-            }
+        sketchPngBytes(context, screen.imagePath)?.let { pngBytes ->
+            SketchImageAsset(index, screen, sketchImageId(pngBytes), screen.imagePath)
         }
     }
     require(assets.isNotEmpty()) { "No screenshot assets are available" }
@@ -2431,8 +2651,8 @@ private fun writeFlowSketch(
                 uniqueAssets.forEach { asset ->
                     // The entry must exactly match the image layer's `_ref`.
                     zip.putNextEntry(ZipEntry("images/${asset.id}.png"))
-                    val pngBytes = sketchPngBytes(asset.file)
-                        ?: error("Unable to decode screenshot asset: ${asset.file.name}")
+                    val pngBytes = sketchPngBytes(context, asset.location)
+                        ?: error("Unable to decode screenshot asset: ${asset.location}")
                     check(sketchImageId(pngBytes) == asset.id) { "Screenshot asset changed during export" }
                     zip.write(pngBytes)
                     zip.closeEntry()
@@ -2612,9 +2832,9 @@ private fun openPdfPreview(context: Context, uri: Uri) {
 ) {
     val bitmaps = rememberScreenBitmaps(screens, maxDimension = 1600)
     var selectedScreen by remember { mutableStateOf<ScreenEntity?>(null) }
-    // One scrollable document, with five screenshots per row. The outer
-    // editor owns scrolling; no diagram-page toggler is required.
-    val columns = minOf(5, screens.size.coerceAtLeast(1))
+    // Keep the diagram in a scrollable document while respecting the
+    // author-selected number of screenshots in each row.
+    val columns = flow.preferredColumns.coerceIn(1, screens.size.coerceAtLeast(1))
     val rows = (screens.size + columns - 1) / columns
     val canvasHeight = (rows * 132).dp
     val contentScroll = rememberScrollState()
@@ -2634,6 +2854,7 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                         bitmaps = bitmaps,
                         showMobileStencils = flow.showMobileStencils,
                         connectorColor = Color(flow.connectorColor.toInt()),
+                        columnsOverride = columns,
                         onScreenClick = {
                             selectedScreen = it
                             onLightboxVisibilityChange(true)
@@ -2683,6 +2904,17 @@ private fun openPdfPreview(context: Context, uri: Uri) {
 }
 
 /** Full-screen viewer for inspecting an individual screenshot without changing the diagram. */
+/** Bounds of the actual fitted screenshot, excluding black letterbox bars. */
+private fun fittedScreenshotRect(
+    containerWidth: Float,
+    containerHeight: Float,
+    imageWidth: Int,
+    imageHeight: Int
+): androidx.compose.ui.geometry.Rect {
+    val bounds = fittedScreenshotBounds(containerWidth, containerHeight, imageWidth, imageHeight)
+    return androidx.compose.ui.geometry.Rect(bounds.left, bounds.top, bounds.left + bounds.width, bounds.top + bounds.height)
+}
+
 @Composable private fun ScreenshotLightbox(
     screen: ScreenEntity,
     screenPosition: Int,
@@ -2713,7 +2945,9 @@ private fun openPdfPreview(context: Context, uri: Uri) {
             controller.isAppearanceLightNavigationBars = previousLightNavigationIcons
         }
     }
-    val bitmap = rememberScreenBitmaps(listOf(screen), maxDimension = 2400)[screen.id]
+    val screenshotState = rememberScreenBitmapStates(listOf(screen), maxDimension = 2400)[screen.id]
+        ?: ScreenshotBitmapState.Loading
+    val bitmap = (screenshotState as? ScreenshotBitmapState.Ready)?.bitmap
     var visible by remember { mutableStateOf(false) }
     var closeRequested by remember { mutableStateOf(false) }
     var showDeleteConfirmation by remember { mutableStateOf(false) }
@@ -2801,20 +3035,28 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                 shadowElevation = 24.dp
             ) {
                 val pointerDragModifier = if (editingPointer) {
-                    Modifier.pointerInput(screen.id) {
+                    Modifier.pointerInput(screen.id, bitmap) {
+                        var draggingMarker = false
+                        fun normalize(position: Offset): Offset {
+                            val image = bitmap
+                            if (image == null) return Offset(.5f, .5f)
+                            val rect = fittedScreenshotRect(size.width.toFloat(), size.height.toFloat(), image.width, image.height)
+                            return Offset(
+                                ((position.x - rect.left) / rect.width).coerceIn(0f, 1f),
+                                ((position.y - rect.top) / rect.height).coerceIn(0f, 1f)
+                            )
+                        }
                         detectDragGestures(
                             onDragStart = { start ->
-                                pointerPosition = Offset(
-                                    (start.x / size.width).coerceIn(0f, 1f),
-                                    (start.y / size.height).coerceIn(0f, 1f)
-                                )
+                                val image = bitmap
+                                draggingMarker = image != null && fittedScreenshotRect(size.width.toFloat(), size.height.toFloat(), image.width, image.height).contains(start)
+                                if (draggingMarker) pointerPosition = normalize(start)
                             }
                         ) { change, dragAmount ->
-                            change.consume()
-                            pointerPosition = Offset(
-                                (pointerPosition.x + dragAmount.x / size.width).coerceIn(0f, 1f),
-                                (pointerPosition.y + dragAmount.y / size.height).coerceIn(0f, 1f)
-                            )
+                            if (draggingMarker) {
+                                change.consume()
+                                pointerPosition = normalize(change.position)
+                            }
                         }
                     }
                 } else Modifier
@@ -2844,17 +3086,41 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                             modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)),
                             contentScale = ContentScale.Fit
                         )
-                    } else {
-                        Text(
-                            "Screenshot unavailable",
+                    } else if (screenshotState is ScreenshotBitmapState.Loading) {
+                        Column(
                             modifier = Modifier.align(Alignment.Center),
-                            color = Color.White,
-                            fontSize = 16.sp
-                        )
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(30.dp),
+                                color = Color.White,
+                                strokeWidth = 3.dp
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            Text("Loading screenshot…", color = Color.White, fontSize = 14.sp)
+                        }
+                    } else {
+                        Column(
+                            modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = null, tint = Color(0xFFFFB4AB), modifier = Modifier.size(30.dp))
+                            Spacer(Modifier.height(12.dp))
+                            Text("Screenshot unavailable", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(4.dp))
+                            Text("The file was moved, deleted, or could not be read.", color = Color(0xFFCBD5E1), fontSize = 13.sp, textAlign = TextAlign.Center)
+                        }
                     }
                     if (editingPointer) {
                         Canvas(Modifier.fillMaxSize()) {
-                            val marker = Offset(size.width * pointerPosition.x, size.height * pointerPosition.y)
+                            val image = bitmap
+                            val imageRect = if (image == null) {
+                                androidx.compose.ui.geometry.Rect(0f, 0f, size.width, size.height)
+                            } else fittedScreenshotRect(size.width, size.height, image.width, image.height)
+                            val marker = Offset(
+                                imageRect.left + imageRect.width * pointerPosition.x,
+                                imageRect.top + imageRect.height * pointerPosition.y
+                            )
                             // The positioning stencil makes the exact x/y location
                             // readable while the user drags the connection pointer.
                             drawLine(
@@ -2873,19 +3139,6 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                             drawCircle(Color.White.copy(alpha = .9f), 21f, marker)
                             drawCircle(Color(0xFF4F46E5), 12f, marker)
                             drawCircle(Color.White, 4f, marker)
-                        }
-                        Surface(
-                            modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
-                            color = Color(0xD9111111),
-                            shape = RoundedCornerShape(18.dp)
-                        ) {
-                            Text(
-                                "Drag the marker to adjust the pointer",
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium
-                            )
                         }
                     }
                 }
@@ -2930,6 +3183,23 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                     )
                 }
             }
+            if (editingPointer) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .offset(y = (-164).dp),
+                    color = Color(0xD9111111),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text(
+                        "Drag the marker to adjust the pointer",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
             Surface(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -2959,7 +3229,9 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                     } else {
                     LightboxDrawableAction(R.drawable.ic_lightbox_share, "Share", onClick = {
                         runCatching {
-                            val imageUri = FileProvider.getUriForFile(
+                            val imageUri = if (screen.imagePath.startsWith("content://")) {
+                                Uri.parse(screen.imagePath)
+                            } else FileProvider.getUriForFile(
                                 context,
                                 "${context.packageName}.fileprovider",
                                 java.io.File(screen.imagePath)
