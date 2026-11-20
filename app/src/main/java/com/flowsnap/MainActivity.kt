@@ -1,3 +1,5 @@
+@file:Suppress("SpellCheckingInspection", "GrazieInspection")
+
 package com.flowsnap
 
 import android.app.Activity
@@ -79,6 +81,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedButton
@@ -95,7 +98,9 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.SideEffect
@@ -173,6 +178,13 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 data class CaptureReview(val flowId: String, val path: String, val markerX: Float, val markerY: Float)
+data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bottom: Float) {
+    companion object { val Full = CaptureCrop(0f, 0f, 1f, 1f) }
+    fun valid(): CaptureCrop {
+        val l = left.coerceIn(0f, .92f); val t = top.coerceIn(0f, .92f)
+        return copy(left = l, top = t, right = right.coerceIn(l + .08f, 1f), bottom = bottom.coerceIn(t + .08f, 1f))
+    }
+}
 
 private val Urbanist = FontFamily(
     Font(R.font.urbanist_regular, FontWeight.Normal),
@@ -319,6 +331,19 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
         if (!saved) ScreenshotStorage.delete(getApplication(), review.path)
         onSaved(if (saved) dao.flow(review.flowId) else null)
     }
+    fun cropCapture(review: CaptureReview, crop: CaptureCrop, done: (Boolean) -> Unit) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        val ok = runCatching {
+            val bitmap = android.graphics.BitmapFactory.decodeFile(review.path) ?: error("Unable to load capture")
+            try {
+                val c = crop.valid(); val x = (bitmap.width * c.left).toInt(); val y = (bitmap.height * c.top).toInt()
+                val w = (bitmap.width * (c.right - c.left)).toInt().coerceAtLeast(1); val h = (bitmap.height * (c.bottom - c.top)).toInt().coerceAtLeast(1)
+                val cut = android.graphics.Bitmap.createBitmap(bitmap, x, y, w.coerceAtMost(bitmap.width - x), h.coerceAtMost(bitmap.height - y))
+                try { java.io.File(review.path).outputStream().use { check(cut.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)) } } finally { cut.recycle() }
+                invalidateScreenshotBitmap(review.path)
+            } finally { bitmap.recycle() }
+        }.isSuccess
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { done(ok) }
+    }
     fun deleteFlow(flow: FlowEntity, onDeleted: () -> Unit) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
         // Commit the cascaded Room delete first. Any failed file deletes are removed by startup reconciliation.
         val paths = dao.deleteFlowAndGetImagePaths(flow.id)
@@ -335,18 +360,18 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { onSaved() }
     }
     fun replaceScreenImage(screen: ScreenEntity, source: Uri, onComplete: (Boolean) -> Unit) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-        var replacement: Uri? = null
+        var replacement: java.io.File? = null
         val result = runCatching {
-            replacement = ScreenshotStorage.newCaptureUri(getApplication(), screen.flowId)
+            val newReplacement = ScreenshotStorage.newCaptureFile(getApplication(), screen.flowId)
+            replacement = newReplacement
             getApplication<android.app.Application>().contentResolver.openInputStream(source)?.use { input ->
-                getApplication<android.app.Application>().contentResolver.openOutputStream(replacement!!)?.use { output -> input.copyTo(output) }
-                    ?: error("Unable to open screenshot destination")
+                newReplacement.outputStream().use { output -> input.copyTo(output) }
             } ?: error("Unable to read selected image")
-            dao.updateScreen(screen.copy(imagePath = replacement.toString()))
+            dao.updateScreen(screen.copy(imagePath = newReplacement.absolutePath))
             dao.touchFlow(screen.flowId, System.currentTimeMillis())
             runCatching { ScreenshotStorage.delete(getApplication(), screen.imagePath) }
         }
-        if (result.isFailure) replacement?.let { ScreenshotStorage.delete(getApplication(), it.toString()) }
+        if (result.isFailure) replacement?.let { ScreenshotStorage.delete(getApplication(), it.absolutePath) }
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { onComplete(result.isSuccess) }
     }
     fun screens(flowId: String) = dao.observeScreens(flowId)
@@ -649,10 +674,9 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
 }
 
 @Composable private fun SettingsActionRow(title: String, trailing: @Composable () -> Unit, onClick: (() -> Unit)? = null) {
-    val action = onClick
     val interactionSource = remember { MutableInteractionSource() }
     val rowModifier = Modifier.fillMaxWidth().let { modifier ->
-        if (action == null) modifier else modifier.clickable(interactionSource = interactionSource, indication = null, onClick = action)
+        if (onClick == null) modifier else modifier.clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
     }.padding(vertical = 4.dp)
     Row(rowModifier, verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
@@ -826,9 +850,30 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
             activity.moveTaskToBack(true)
         }, 180L)
     }
-    val bitmap = rememberScreenBitmaps(listOf(ScreenEntity("review", review.flowId, review.path, 0f, 0f, 0, 0L)), maxDimension = 1600)["review"]
+    var croppedReview by remember(review) { mutableStateOf(review) }
+    var cropRevision by remember(review) { mutableIntStateOf(0) }
+    val bitmapKey = "review-$cropRevision"
+    val bitmap = rememberScreenBitmaps(listOf(ScreenEntity(bitmapKey, croppedReview.flowId, croppedReview.path, 0f, 0f, 0, 0L)), maxDimension = 1600)[bitmapKey]
     var draggedMarker by remember { mutableStateOf<Offset?>(null) }
     var reviewCanvasSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    var showCropEditor by remember { mutableStateOf(false) }
+    val hostWindow = (context as? Activity)?.window
+    androidx.compose.runtime.DisposableEffect(showCropEditor, hostWindow) {
+        if (!showCropEditor || hostWindow == null) return@DisposableEffect onDispose { }
+        val controller = WindowCompat.getInsetsController(hostWindow, hostWindow.decorView)
+        val previousStatusBarColor = hostWindow.statusBarColor
+        val previousLightStatusIcons = controller.isAppearanceLightStatusBars
+        // This is the system-owned strip at the very top. Give it a real
+        // opaque colour while the crop dialog is present, then restore it.
+        WindowCompat.setDecorFitsSystemWindows(hostWindow, true)
+        hostWindow.statusBarColor = android.graphics.Color.rgb(23, 23, 23)
+        controller.isAppearanceLightStatusBars = false
+        onDispose {
+            hostWindow.statusBarColor = previousStatusBarColor
+            controller.isAppearanceLightStatusBars = previousLightStatusIcons
+            WindowCompat.setDecorFitsSystemWindows(hostWindow, false)
+        }
+    }
     // A user can reposition the marker on this review screen. Persist that
     // final normalized location, rather than the original overlay location.
     val reviewedCapture = draggedMarker?.let { marker ->
@@ -837,19 +882,20 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                 fittedScreenshotBounds(reviewCanvasSize.width.toFloat(), reviewCanvasSize.height.toFloat(), it.width, it.height)
             } ?: ScreenshotBounds(0f, 0f, reviewCanvasSize.width.toFloat(), reviewCanvasSize.height.toFloat())
             val (markerX, markerY) = bounds.normalize(marker.x, marker.y)
-            review.copy(
+            croppedReview.copy(
                 markerX = markerX,
                 markerY = markerY
             )
-        } else review
-    } ?: review
+        } else croppedReview
+    } ?: croppedReview
     // Keep the review actions above Android's gesture/navigation area.
     val primaryBlue = Color(0xFF4F46E5)
     val pageBackground = Color(0xFFF5F6FA)
-    Column(
-        Modifier.fillMaxSize().background(pageBackground).windowInsetsPadding(WindowInsets.systemBars),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
+    Box(Modifier.fillMaxSize()) {
+        Column(
+            Modifier.fillMaxSize().background(pageBackground).windowInsetsPadding(WindowInsets.systemBars),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
         Surface(
             modifier = Modifier.fillMaxWidth(),
             color = Color.White,
@@ -864,6 +910,11 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                     Text("Review capture", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF17171A))
                     Text("Drag the marker to set the next step", fontSize = 12.sp, color = Color(0xFF6B7280))
                 }
+                OutlinedButton(
+                    onClick = { showCropEditor = true }, enabled = bitmap != null,
+                    shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, primaryBlue),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                ) { Text("CROP", color = primaryBlue, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
             }
         }
         Box(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 20.dp, vertical = 18.dp), contentAlignment = Alignment.Center) {
@@ -891,7 +942,7 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                             } }) {
                                 val bounds = bitmap?.let { fittedScreenshotBounds(size.width, size.height, it.width, it.height) }
                                     ?: ScreenshotBounds(0f, 0f, size.width, size.height)
-                                val (markerX, markerY) = bounds.pointFor(review.markerX, review.markerY)
+                                val (markerX, markerY) = bounds.pointFor(croppedReview.markerX, croppedReview.markerY)
                                 val marker = draggedMarker ?: Offset(markerX, markerY)
                                 // Keep the transition marker deliberately minimal: no label or coloured halo.
                                 drawCircle(Color.White, 26f, marker)
@@ -945,6 +996,186 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                 }
             }
         }
+        }
+    }
+    if (showCropEditor && bitmap != null) {
+        ReviewCaptureCropDialog(
+            bitmap = bitmap,
+            onCancel = { showCropEditor = false },
+            onSave = { crop ->
+                vm.cropCapture(croppedReview, crop) { saved ->
+                    if (saved) {
+                        val normalized = crop.valid()
+                        croppedReview = croppedReview.copy(
+                            markerX = ((croppedReview.markerX - normalized.left) / (normalized.right - normalized.left)).coerceIn(0f, 1f),
+                            markerY = ((croppedReview.markerY - normalized.top) / (normalized.bottom - normalized.top)).coerceIn(0f, 1f)
+                        )
+                        draggedMarker = null
+                        cropRevision++
+                    }
+                    showCropEditor = false
+                    android.widget.Toast.makeText(
+                        context,
+                        if (saved) "Crop applied" else "Couldn't crop this capture",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        )
+    }
+}
+
+/** A temporary editor: its result is written to the pending capture before it is kept. */
+@Composable
+private fun ReviewCaptureCropDialog(
+    bitmap: androidx.compose.ui.graphics.ImageBitmap,
+    onCancel: () -> Unit,
+    onSave: (CaptureCrop) -> Unit
+) {
+    var crop by remember(bitmap) { mutableStateOf(CaptureCrop.Full) }
+    var previousCrop by remember(bitmap) { mutableStateOf<CaptureCrop?>(null) }
+    var draggingCorner by remember { mutableStateOf<Int?>(null) }
+    val latestCrop by rememberUpdatedState(crop)
+    val previewInset = 16.dp
+    // Match the screenshot lightbox: near-black surfaces and high-contrast white controls.
+    val accent = Color.White
+
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)
+    ) {
+        // Own one predictable scrim instead of combining the platform dialog
+        // dim with a Compose backdrop.
+        val dialogView = LocalView.current
+        SideEffect {
+            val window = (dialogView.parent as? DialogWindowProvider)?.window
+            window?.let { WindowCompat.setDecorFitsSystemWindows(it, true) }
+            window?.setDimAmount(0f)
+            window?.statusBarColor = android.graphics.Color.rgb(23, 23, 23)
+            window?.let {
+                WindowCompat.getInsetsController(it, dialogView).isAppearanceLightStatusBars = false
+                WindowCompat.getInsetsController(it, dialogView).isAppearanceLightNavigationBars = false
+            }
+        }
+        Box(
+            Modifier.fillMaxSize().background(Color(0xB805070B)),
+            contentAlignment = Alignment.Center
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(.94f),
+                shape = RoundedCornerShape(28.dp),
+                color = Color(0xFF191919),
+                shadowElevation = 20.dp
+            ) {
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column {
+                        Text("Crop capture", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                        Text("Drag a corner to choose what to keep", color = Color(0xFFB7B7B7), fontSize = 12.sp)
+                    }
+                    IconButton(onClick = onCancel, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Filled.Close, contentDescription = "Close crop editor", tint = Color.White)
+                    }
+                }
+                Box(
+                    Modifier.fillMaxWidth().height(420.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color(0xFF101116))
+                        .border(1.dp, Color(0xFF2B2B2B), RoundedCornerShape(20.dp))
+                ) {
+                    androidx.compose.foundation.Image(
+                        bitmap,
+                        "Crop preview",
+                        Modifier.fillMaxSize().padding(previewInset),
+                        contentScale = ContentScale.Fit
+                    )
+                    Canvas(
+                        Modifier.fillMaxSize().pointerInput(bitmap) {
+                            detectDragGestures(
+                                onDragStart = { start ->
+                                    val rect = fittedScreenshotRectInPadding(size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height, previewInset.toPx())
+                                    val c = latestCrop.valid()
+                                    val corners = listOf(
+                                        Offset(rect.left + rect.width * c.left, rect.top + rect.height * c.top),
+                                        Offset(rect.left + rect.width * c.right, rect.top + rect.height * c.top),
+                                        Offset(rect.left + rect.width * c.right, rect.top + rect.height * c.bottom),
+                                        Offset(rect.left + rect.width * c.left, rect.top + rect.height * c.bottom)
+                                    )
+                                    val closest = corners.indices.minByOrNull { (corners[it] - start).getDistance() }
+                                    draggingCorner = closest?.takeIf { (corners[it] - start).getDistance() <= 42.dp.toPx() }
+                                    if (draggingCorner != null) previousCrop = c
+                                },
+                                onDragEnd = { draggingCorner = null },
+                                onDragCancel = { draggingCorner = null }
+                            ) { change, _ ->
+                                val corner = draggingCorner ?: return@detectDragGestures
+                                change.consume()
+                                val rect = fittedScreenshotRectInPadding(size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height, previewInset.toPx())
+                                val x = ((change.position.x - rect.left) / rect.width).coerceIn(0f, 1f)
+                                val y = ((change.position.y - rect.top) / rect.height).coerceIn(0f, 1f)
+                                val current = latestCrop
+                                crop = when (corner) {
+                                    0 -> current.copy(left = x, top = y)
+                                    1 -> current.copy(right = x, top = y)
+                                    2 -> current.copy(right = x, bottom = y)
+                                    else -> current.copy(left = x, bottom = y)
+                                }.valid()
+                            }
+                        }
+                    ) {
+                        val rect = fittedScreenshotRectInPadding(size.width, size.height, bitmap.width, bitmap.height, previewInset.toPx())
+                        val c = crop.valid()
+                        val left = rect.left + rect.width * c.left
+                        val top = rect.top + rect.height * c.top
+                        val right = rect.left + rect.width * c.right
+                        val bottom = rect.top + rect.height * c.bottom
+                        val dim = Color.Black.copy(alpha = .58f)
+                        drawRect(dim, topLeft = Offset(rect.left, rect.top), size = androidx.compose.ui.geometry.Size(rect.width, top - rect.top))
+                        drawRect(dim, topLeft = Offset(rect.left, bottom), size = androidx.compose.ui.geometry.Size(rect.width, rect.top + rect.height - bottom))
+                        drawRect(dim, topLeft = Offset(rect.left, top), size = androidx.compose.ui.geometry.Size(left - rect.left, bottom - top))
+                        drawRect(dim, topLeft = Offset(right, top), size = androidx.compose.ui.geometry.Size(rect.left + rect.width - right, bottom - top))
+                        val handleInset = 6.dp.toPx()
+                        drawRect(
+                            accent.copy(alpha = .95f),
+                            topLeft = Offset(left, top),
+                            size = androidx.compose.ui.geometry.Size(right - left, bottom - top),
+                            style = Stroke(1.5.dp.toPx())
+                        )
+                        listOf(Offset(left, top), Offset(right, top), Offset(right, bottom), Offset(left, bottom)).forEach { point ->
+                            // A full-image crop has its border on the edge. Keep the visual handle
+                            // inside the canvas so it remains complete and easy to grab.
+                            val handle = Offset(
+                                point.x.coerceIn(handleInset, size.width - handleInset),
+                                point.y.coerceIn(handleInset, size.height - handleInset)
+                            )
+                            drawCircle(accent, 6.dp.toPx(), handle)
+                            drawCircle(Color(0xFF191919), 2.5.dp.toPx(), handle)
+                        }
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(
+                        onClick = { previousCrop?.let { crop = it } },
+                        enabled = previousCrop != null,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, Color(0xFF424242)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = Color.White,
+                            disabledContentColor = Color(0xFF838383),
+                            disabledContainerColor = Color.Transparent
+                        )
+                    ) { Text("Undo", fontWeight = FontWeight.SemiBold) }
+                    Button(
+                        onClick = { onSave(crop.valid()) },
+                        modifier = Modifier.weight(1.35f),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color(0xFF171717))
+                    ) { Text("Apply crop", fontWeight = FontWeight.Bold) }
+                }
+            }
+            }
+        }
     }
 }
 
@@ -973,7 +1204,6 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
     var captureLaunchInProgress by remember { mutableStateOf(false) }
     var resumeCaptureAfterOverlayGrant by rememberSaveable { mutableStateOf(false) }
     var launchCaptureAfterNotificationRequest by rememberSaveable { mutableStateOf(false) }
-    var launchCaptureAfterFolderSelection by rememberSaveable { mutableStateOf(false) }
     var exportJpegAfterPermission by rememberSaveable { mutableStateOf(false) }
     var exportPngAfterPermission by rememberSaveable { mutableStateOf(false) }
     var exportSketchAfterPermission by rememberSaveable { mutableStateOf(false) }
@@ -1081,25 +1311,6 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
             } else projectionManager.createScreenCaptureIntent()
         )
     }
-    val screenshotFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri == null) {
-            launchCaptureAfterFolderSelection = false
-            android.widget.Toast.makeText(context, "Choose a folder to save screenshots", android.widget.Toast.LENGTH_LONG).show()
-        } else {
-            runCatching { ScreenshotStorage.saveCaptureDestination(context, uri) }
-                .onSuccess { launchCaptureAfterFolderSelection = true }
-                .onFailure { error ->
-                    launchCaptureAfterFolderSelection = false
-                    android.widget.Toast.makeText(context, "Unable to use that folder: ${error.message ?: "unknown error"}", android.widget.Toast.LENGTH_LONG).show()
-                }
-        }
-    }
-    androidx.compose.runtime.LaunchedEffect(launchCaptureAfterFolderSelection) {
-        if (launchCaptureAfterFolderSelection) {
-            launchCaptureAfterFolderSelection = false
-            launchProjection()
-        }
-    }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         // Foreground capture remains available when the user declines; Android still requires the service notification.
         launchCaptureAfterNotificationRequest = true
@@ -1128,10 +1339,6 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
     val beginCapture = {
         when {
             captureLaunchInProgress -> Unit
-            !ScreenshotStorage.hasCaptureDestination(context) -> {
-                launchCaptureAfterFolderSelection = true
-                screenshotFolderPicker.launch(null)
-            }
             !Settings.canDrawOverlays(context) -> {
                 // Do not launch projection consent until the user has returned
                 // from overlay permission settings. Launching both at once can
@@ -1302,45 +1509,61 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
 @Composable private fun CaptureTipDialog(onConfirm: (Boolean) -> Unit) {
     val primaryBlue = Color(0xFF4F46E5)
     var dontShowAgain by remember { mutableStateOf(false) }
-    AlertDialog(
-        onDismissRequest = { },
-        containerColor = Color.White,
-        shape = RoundedCornerShape(24.dp),
-        titleContentColor = Color(0xFF1F2D43),
-        textContentColor = Color(0xFF66758A),
-        title = {
-            Text("Tips to get you started", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        },
-        text = {
-            Column {
-                Text("A floating widget will appear on your screen.", fontSize = 14.sp, lineHeight = 20.sp)
-                Spacer(Modifier.height(4.dp))
-                Text("Drag it where you want the arrow to go.", fontSize = 14.sp, lineHeight = 20.sp)
+    Dialog(onDismissRequest = { }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(.88f),
+            color = Color.White,
+            shape = RoundedCornerShape(28.dp),
+            border = BorderStroke(1.dp, Color(0xFFE5E7F0)),
+            shadowElevation = 16.dp
+        ) {
+            Column(Modifier.padding(22.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier.size(46.dp).background(Color(0xFFEDEBFF), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.PhoneAndroid, contentDescription = null, tint = primaryBlue, modifier = Modifier.size(25.dp))
+                    }
+                    Spacer(Modifier.width(14.dp))
+                    Column {
+                        Text("Ready to capture?", color = Color(0xFF1F2D43), fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                        Text("A quick guide to the capture bubble", color = Color(0xFF718096), fontSize = 13.sp)
+                    }
+                }
+                Spacer(Modifier.height(20.dp))
+                Text(
+                    "FlowSnap will show a floating bubble above the app you are documenting.",
+                    color = Color(0xFF4B5B72),
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp
+                )
                 Spacer(Modifier.height(16.dp))
                 DragTapIllustration(primaryBlue)
-                Spacer(Modifier.height(14.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.height(16.dp))
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { dontShowAgain = !dontShowAgain }.padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Checkbox(
                         checked = dontShowAgain,
                         onCheckedChange = { dontShowAgain = it },
-                        modifier = Modifier.size(26.dp),
-                        colors = CheckboxDefaults.colors(
-                            checkedColor = primaryBlue,
-                            uncheckedColor = primaryBlue,
-                            checkmarkColor = Color.White
-                        )
+                        modifier = Modifier.size(24.dp),
+                        colors = CheckboxDefaults.colors(checkedColor = primaryBlue, uncheckedColor = Color(0xFF7C8798), checkmarkColor = Color.White)
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Text("Don't show this again", color = Color(0xFF334155), fontSize = 13.sp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Don't show this guide again", color = Color(0xFF334155), fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(dontShowAgain) }) {
-                Text("OK", color = primaryBlue, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(18.dp))
+                Button(
+                    onClick = { onConfirm(dontShowAgain) },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = Color.White)
+                ) { Text("GOT IT", fontWeight = FontWeight.Bold, letterSpacing = .6.sp) }
             }
         }
-    )
+    }
 }
 
 /** Export chooser shown by the bottom-left floppy-disk control. */
@@ -1454,7 +1677,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     var showAppVersion by remember(flow.id) { mutableStateOf(flow.showAppVersion) }
     var showMobileStencils by remember(flow.id) { mutableStateOf(flow.showMobileStencils) }
     var connectorColor by remember(flow.id) { mutableLongStateOf(flow.connectorColor) }
-    var preferredColumns by remember(flow.id) { mutableStateOf(flow.preferredColumns.coerceIn(1, 9)) }
+    var preferredColumns by remember(flow.id) { mutableIntStateOf(flow.preferredColumns.coerceIn(1, 9)) }
     var appearancePage by remember(flow.id) { mutableStateOf(false) }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         // Keep the canvas visible without the heavy, muddy system dim overlay.
@@ -1779,30 +2002,43 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     ) { if (included) Text("✓", color = Color(0xFF4F46E5), fontSize = 20.sp, fontWeight = FontWeight.Bold) }
 }
 
-@Composable private fun DragTapIllustration(primaryBlue: Color) = Column(
-    Modifier.fillMaxWidth(),
-    horizontalAlignment = Alignment.CenterHorizontally
+@Composable private fun DragTapIllustration(primaryBlue: Color) = Surface(
+    modifier = Modifier.fillMaxWidth(),
+    color = Color(0xFFF7F7FF),
+    shape = RoundedCornerShape(18.dp),
+    border = BorderStroke(1.dp, Color(0xFFE3E2FF))
 ) {
-    Text("↘     ↙", color = primaryBlue, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-    Box(
-        Modifier.size(82.dp)
-            .background(Color(0xFFF1F6FD), CircleShape)
-            .border(1.5.dp, primaryBlue, CircleShape),
-        contentAlignment = Alignment.Center
-    ) {
-        Box(Modifier.size(58.dp).background(primaryBlue, CircleShape), contentAlignment = Alignment.Center) {
-            Text("Drag\n& tap", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center)
-        }
+    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        CaptureTipStep(
+            number = "1",
+            title = "Drag the bubble",
+            detail = "Place it over the spot you want to point to.",
+            primaryBlue = primaryBlue
+        )
+        CaptureTipStep(
+            number = "2",
+            title = "Tap to capture",
+            detail = "Take a screenshot when the bubble is in place.",
+            primaryBlue = primaryBlue
+        )
+        CaptureTipStep(
+            number = "3",
+            title = "Return to FlowSnap",
+            detail = "Tap the checkmark when you are finished.",
+            primaryBlue = primaryBlue
+        )
     }
-    Spacer(Modifier.height(10.dp))
-    Row(Modifier.fillMaxWidth()) {
-        Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("CAPTURE", color = primaryBlue, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-            Text("Tap to take a screenshot", color = Color(0xFF66758A), fontSize = 10.sp, textAlign = TextAlign.Center)
+}
+
+@Composable private fun CaptureTipStep(number: String, title: String, detail: String, primaryBlue: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(28.dp).background(primaryBlue, CircleShape), contentAlignment = Alignment.Center) {
+            Text(number, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
-        Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("RETURN", color = primaryBlue, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-            Text("Tap ✓ to return to FlowSnap", color = Color(0xFF66758A), fontSize = 10.sp, textAlign = TextAlign.Center)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, color = Color(0xFF26334A), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(detail, color = Color(0xFF718096), fontSize = 12.sp, lineHeight = 16.sp)
         }
     }
 }
@@ -1855,7 +2091,7 @@ private fun decodeExportBitmap(context: Context, path: String, maxWidth: Int, ma
 
 private fun decodeBitmap(context: Context, location: String, options: android.graphics.BitmapFactory.Options): android.graphics.Bitmap? =
     if (location.startsWith("content://")) {
-        context.contentResolver.openInputStream(Uri.parse(location))?.use { android.graphics.BitmapFactory.decodeStream(it, null, options) }
+        context.contentResolver.openInputStream(location.toUri())?.use { android.graphics.BitmapFactory.decodeStream(it, null, options) }
     } else android.graphics.BitmapFactory.decodeFile(location, options)
 
 /** Writes the same paged 7 x 4 flow arrangement to a user-selected PDF file. */
@@ -2915,6 +3151,25 @@ private fun fittedScreenshotRect(
     return androidx.compose.ui.geometry.Rect(bounds.left, bounds.top, bounds.left + bounds.width, bounds.top + bounds.height)
 }
 
+/** The crop editor leaves a dark rail around the image for its border and handles. */
+private fun fittedScreenshotRectInPadding(
+    containerWidth: Float,
+    containerHeight: Float,
+    imageWidth: Int,
+    imageHeight: Int,
+    padding: Float
+): androidx.compose.ui.geometry.Rect {
+    val innerWidth = (containerWidth - 2f * padding).coerceAtLeast(1f)
+    val innerHeight = (containerHeight - 2f * padding).coerceAtLeast(1f)
+    val inner = fittedScreenshotRect(innerWidth, innerHeight, imageWidth, imageHeight)
+    return androidx.compose.ui.geometry.Rect(
+        inner.left + padding,
+        inner.top + padding,
+        inner.right + padding,
+        inner.bottom + padding
+    )
+}
+
 @Composable private fun ScreenshotLightbox(
     screen: ScreenEntity,
     screenPosition: Int,
@@ -3038,9 +3293,8 @@ private fun fittedScreenshotRect(
                     Modifier.pointerInput(screen.id, bitmap) {
                         var draggingMarker = false
                         fun normalize(position: Offset): Offset {
-                            val image = bitmap
-                            if (image == null) return Offset(.5f, .5f)
-                            val rect = fittedScreenshotRect(size.width.toFloat(), size.height.toFloat(), image.width, image.height)
+                            if (bitmap == null) return Offset(.5f, .5f)
+                            val rect = fittedScreenshotRect(size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height)
                             return Offset(
                                 ((position.x - rect.left) / rect.width).coerceIn(0f, 1f),
                                 ((position.y - rect.top) / rect.height).coerceIn(0f, 1f)
@@ -3048,11 +3302,10 @@ private fun fittedScreenshotRect(
                         }
                         detectDragGestures(
                             onDragStart = { start ->
-                                val image = bitmap
-                                draggingMarker = image != null && fittedScreenshotRect(size.width.toFloat(), size.height.toFloat(), image.width, image.height).contains(start)
+                                draggingMarker = bitmap != null && fittedScreenshotRect(size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height).contains(start)
                                 if (draggingMarker) pointerPosition = normalize(start)
                             }
-                        ) { change, dragAmount ->
+                        ) { change, _ ->
                             if (draggingMarker) {
                                 change.consume()
                                 pointerPosition = normalize(change.position)
@@ -3113,10 +3366,9 @@ private fun fittedScreenshotRect(
                     }
                     if (editingPointer) {
                         Canvas(Modifier.fillMaxSize()) {
-                            val image = bitmap
-                            val imageRect = if (image == null) {
+                            val imageRect = if (bitmap == null) {
                                 androidx.compose.ui.geometry.Rect(0f, 0f, size.width, size.height)
-                            } else fittedScreenshotRect(size.width, size.height, image.width, image.height)
+                            } else fittedScreenshotRect(size.width, size.height, bitmap.width, bitmap.height)
                             val marker = Offset(
                                 imageRect.left + imageRect.width * pointerPosition.x,
                                 imageRect.top + imageRect.height * pointerPosition.y
@@ -3230,7 +3482,7 @@ private fun fittedScreenshotRect(
                     LightboxDrawableAction(R.drawable.ic_lightbox_share, "Share", onClick = {
                         runCatching {
                             val imageUri = if (screen.imagePath.startsWith("content://")) {
-                                Uri.parse(screen.imagePath)
+                                screen.imagePath.toUri()
                             } else FileProvider.getUriForFile(
                                 context,
                                 "${context.packageName}.fileprovider",

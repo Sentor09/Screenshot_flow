@@ -34,12 +34,22 @@ private object ScreenshotBitmapLoader {
         }
     }
 
+    /** The review crop editor overwrites a pending capture at the same path. */
+    fun invalidate(path: String) {
+        cache.snapshot().keys
+            .filter { it.startsWith("$path@") }
+            .forEach { cache.remove(it) }
+    }
+
     private fun decode(context: Context, location: String, options: BitmapFactory.Options): Bitmap? =
         if (location.startsWith("content://")) {
             context.contentResolver.openInputStream(Uri.parse(location))?.use { BitmapFactory.decodeStream(it, null, options) }
         } else BitmapFactory.decodeFile(location, options)
 
 }
+
+/** Clears rendered thumbnails after an image file is changed in place. */
+fun invalidateScreenshotBitmap(path: String) = ScreenshotBitmapLoader.invalidate(path)
 
 sealed interface ScreenshotBitmapState {
     data object Loading : ScreenshotBitmapState

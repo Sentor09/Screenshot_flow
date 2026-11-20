@@ -32,6 +32,33 @@ data class ScreenEntity(@PrimaryKey val id: String, val flowId: String, val imag
 ], indices = [Index("flowId"), Index("fromScreenId"), Index("toScreenId")])
 data class TransitionEntity(@PrimaryKey val id: String, val flowId: String, val fromScreenId: String, val toScreenId: String, val fromMarkerX: Float, val fromMarkerY: Float, val createdAt: Long)
 
+/**
+ * A non-destructive edit layer applied to a screenshot. Payloads are JSON so
+ * new edit tools can be added without rewriting existing screenshot records.
+ * All geometry stored in a payload is normalized to the source image (0f..1f).
+ */
+@Entity(
+    tableName = "screenshot_edits",
+    foreignKeys = [ForeignKey(entity = ScreenEntity::class, parentColumns = ["id"], childColumns = ["screenId"], onDelete = ForeignKey.CASCADE)],
+    indices = [Index("screenId")]
+)
+data class ScreenshotEditEntity(
+    @PrimaryKey val id: String,
+    val screenId: String,
+    val type: String,
+    val payload: String,
+    val position: Int,
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
+object ScreenshotEditType {
+    const val BLUR = "blur"
+    const val ARROW = "arrow"
+    const val TEXT = "text"
+    const val DRAWING = "drawing"
+}
+
 @Dao
 interface FlowDao {
     @Query("SELECT * FROM flows ORDER BY updatedAt DESC") fun observeAll(): Flow<List<FlowEntity>>
@@ -44,6 +71,12 @@ interface FlowDao {
     @Query("SELECT * FROM screens WHERE flowId = :flowId ORDER BY position") fun observeScreens(flowId: String): Flow<List<ScreenEntity>>
     @Query("SELECT * FROM screens WHERE flowId = :flowId ORDER BY position") suspend fun screensForFlow(flowId: String): List<ScreenEntity>
     @Query("SELECT imagePath FROM screens") suspend fun referencedImagePaths(): List<String>
+    @Query("SELECT * FROM screenshot_edits WHERE screenId = :screenId ORDER BY position, createdAt") fun observeScreenshotEdits(screenId: String): Flow<List<ScreenshotEditEntity>>
+    @Query("SELECT * FROM screenshot_edits WHERE screenId = :screenId ORDER BY position, createdAt") suspend fun screenshotEdits(screenId: String): List<ScreenshotEditEntity>
+    @Query("SELECT * FROM screenshot_edits WHERE screenId = :screenId AND type = :type LIMIT 1") suspend fun screenshotEdit(screenId: String, type: String): ScreenshotEditEntity?
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insertScreenshotEdit(edit: ScreenshotEditEntity)
+    @Update suspend fun updateScreenshotEdit(edit: ScreenshotEditEntity)
+    @Query("DELETE FROM screenshot_edits WHERE id = :editId") suspend fun deleteScreenshotEdit(editId: String)
     @Insert suspend fun insertScreen(screen: ScreenEntity)
     @Update suspend fun updateScreen(screen: ScreenEntity)
     @Query("UPDATE screens SET markerX = :markerX, markerY = :markerY WHERE id = :screenId")
@@ -97,7 +130,7 @@ interface FlowDao {
     }
 }
 
-@Database(entities = [FlowEntity::class, ScreenEntity::class, TransitionEntity::class], version = 11, exportSchema = true)
+@Database(entities = [FlowEntity::class, ScreenEntity::class, TransitionEntity::class, ScreenshotEditEntity::class], version = 12, exportSchema = true)
 abstract class FlowDatabase : RoomDatabase() {
     abstract fun flowDao(): FlowDao
     companion object {
@@ -167,8 +200,14 @@ abstract class FlowDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE `flows` ADD COLUMN `preferredColumns` INTEGER NOT NULL DEFAULT 5")
             }
         }
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS `screenshot_edits` (`id` TEXT NOT NULL, `screenId` TEXT NOT NULL, `type` TEXT NOT NULL, `payload` TEXT NOT NULL, `position` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`screenId`) REFERENCES `screens`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_screenshot_edits_screenId` ON `screenshot_edits` (`screenId`)")
+            }
+        }
         fun create(context: Context) = Room.databaseBuilder(context.applicationContext, FlowDatabase::class.java, "flowsnap.db")
-            .addMigrations(MIGRATION_4_9, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+            .addMigrations(MIGRATION_4_9, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
             .build()
     }
 }

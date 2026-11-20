@@ -1,0 +1,7 @@
+<resources>
+    <!-- Android 15 otherwise forces transparent edge-to-edge system bars and
+         ignores the crop editor's explicit, temporary status-bar colour. -->
+    <style name="Theme.FlowSnap" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>
