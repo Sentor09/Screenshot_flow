@@ -48,12 +48,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.layout.systemBars
@@ -136,6 +138,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -151,6 +155,7 @@ import androidx.core.content.edit
 import androidx.core.graphics.createBitmap
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
@@ -222,6 +227,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Establish edge-to-edge once for the activity. Individual overlays
+        // never toggle this flag, so opening Crop cannot move the screen.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
         WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = true
         restoreReview(savedInstanceState)
         acceptReviewIntent(intent)
@@ -857,21 +867,22 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
     var draggedMarker by remember { mutableStateOf<Offset?>(null) }
     var reviewCanvasSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
     var showCropEditor by remember { mutableStateOf(false) }
-    val hostWindow = (context as? Activity)?.window
-    androidx.compose.runtime.DisposableEffect(showCropEditor, hostWindow) {
-        if (!showCropEditor || hostWindow == null) return@DisposableEffect onDispose { }
-        val controller = WindowCompat.getInsetsController(hostWindow, hostWindow.decorView)
-        val previousStatusBarColor = hostWindow.statusBarColor
+    val hostActivity = context as? Activity
+    androidx.compose.runtime.DisposableEffect(showCropEditor, hostActivity) {
+        if (!showCropEditor || hostActivity == null) return@DisposableEffect onDispose { }
+        val controller = WindowCompat.getInsetsController(hostActivity.window, hostActivity.window.decorView)
         val previousLightStatusIcons = controller.isAppearanceLightStatusBars
-        // This is the system-owned strip at the very top. Give it a real
-        // opaque colour while the crop dialog is present, then restore it.
-        WindowCompat.setDecorFitsSystemWindows(hostWindow, true)
-        hostWindow.statusBarColor = android.graphics.Color.rgb(23, 23, 23)
+        // This controls only system-bar presentation; it never changes the
+        // activity's decor/inset policy or the Review Capture layout.
         controller.isAppearanceLightStatusBars = false
+        // The crop editor is a full-page workspace, so hide the OEM-controlled
+        // status-bar surface instead of trying to recolor it. This removes the
+        // remaining white band while preserving the host layout underneath.
+        controller.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(WindowInsetsCompat.Type.statusBars())
         onDispose {
-            hostWindow.statusBarColor = previousStatusBarColor
+            controller.show(WindowInsetsCompat.Type.statusBars())
             controller.isAppearanceLightStatusBars = previousLightStatusIcons
-            WindowCompat.setDecorFitsSystemWindows(hostWindow, false)
         }
     }
     // A user can reposition the marker on this review screen. Persist that
@@ -997,9 +1008,8 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
             }
         }
         }
-    }
-    if (showCropEditor && bitmap != null) {
-        ReviewCaptureCropDialog(
+        if (showCropEditor && bitmap != null) {
+        ReviewCaptureCropOverlay(
             bitmap = bitmap,
             onCancel = { showCropEditor = false },
             onSave = { crop ->
@@ -1022,12 +1032,14 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                 }
             }
         )
+        }
     }
 }
 
-/** A temporary editor: its result is written to the pending capture before it is kept. */
+/** A full-page in-screen crop editor: no platform dialog or secondary window. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun ReviewCaptureCropDialog(
+private fun ReviewCaptureCropOverlay(
     bitmap: androidx.compose.ui.graphics.ImageBitmap,
     onCancel: () -> Unit,
     onSave: (CaptureCrop) -> Unit
@@ -1039,35 +1051,28 @@ private fun ReviewCaptureCropDialog(
     val previewInset = 16.dp
     // Match the screenshot lightbox: near-black surfaces and high-contrast white controls.
     val accent = Color.White
+    val overlayInteractionSource = remember { MutableInteractionSource() }
+    val haptics = LocalHapticFeedback.current
+    var edgeHapticMask by remember { mutableIntStateOf(0) }
 
-    Dialog(
-        onDismissRequest = onCancel,
-        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)
-    ) {
-        // Own one predictable scrim instead of combining the platform dialog
-        // dim with a Compose backdrop.
-        val dialogView = LocalView.current
-        SideEffect {
-            val window = (dialogView.parent as? DialogWindowProvider)?.window
-            window?.let { WindowCompat.setDecorFitsSystemWindows(it, true) }
-            window?.setDimAmount(0f)
-            window?.statusBarColor = android.graphics.Color.rgb(23, 23, 23)
-            window?.let {
-                WindowCompat.getInsetsController(it, dialogView).isAppearanceLightStatusBars = false
-                WindowCompat.getInsetsController(it, dialogView).isAppearanceLightNavigationBars = false
-            }
-        }
-        Box(
-            Modifier.fillMaxSize().background(Color(0xB805070B)),
+    Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color(0xFF171717))
+                .clickable(interactionSource = overlayInteractionSource, indication = null, onClick = {}),
             contentAlignment = Alignment.Center
         ) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(.94f),
-                shape = RoundedCornerShape(28.dp),
-                color = Color(0xFF191919),
-                shadowElevation = 20.dp
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    // Reserve the system-bar area even while the crop editor
+                    // hides the status bar. A transient swipe-to-reveal bar
+                    // then occupies empty dark space instead of our header.
+                    .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(horizontal = 20.dp, vertical = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column {
                         Text("Crop capture", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold)
@@ -1078,7 +1083,7 @@ private fun ReviewCaptureCropDialog(
                     }
                 }
                 Box(
-                    Modifier.fillMaxWidth().height(420.dp)
+                    Modifier.fillMaxWidth().weight(1f)
                         .clip(RoundedCornerShape(20.dp))
                         .background(Color(0xFF101116))
                         .border(1.dp, Color(0xFF2B2B2B), RoundedCornerShape(20.dp))
@@ -1103,10 +1108,14 @@ private fun ReviewCaptureCropDialog(
                                     )
                                     val closest = corners.indices.minByOrNull { (corners[it] - start).getDistance() }
                                     draggingCorner = closest?.takeIf { (corners[it] - start).getDistance() <= 42.dp.toPx() }
-                                    if (draggingCorner != null) previousCrop = c
+                                    if (draggingCorner != null) {
+                                        previousCrop = c
+                                        edgeHapticMask = 0
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    }
                                 },
-                                onDragEnd = { draggingCorner = null },
-                                onDragCancel = { draggingCorner = null }
+                                onDragEnd = { draggingCorner = null; edgeHapticMask = 0 },
+                                onDragCancel = { draggingCorner = null; edgeHapticMask = 0 }
                             ) { change, _ ->
                                 val corner = draggingCorner ?: return@detectDragGestures
                                 change.consume()
@@ -1114,12 +1123,23 @@ private fun ReviewCaptureCropDialog(
                                 val x = ((change.position.x - rect.left) / rect.width).coerceIn(0f, 1f)
                                 val y = ((change.position.y - rect.top) / rect.height).coerceIn(0f, 1f)
                                 val current = latestCrop
-                                crop = when (corner) {
+                                val updated = when (corner) {
                                     0 -> current.copy(left = x, top = y)
                                     1 -> current.copy(right = x, top = y)
                                     2 -> current.copy(right = x, bottom = y)
                                     else -> current.copy(left = x, bottom = y)
                                 }.valid()
+                                crop = updated
+                                val edgeMask = when (corner) {
+                                    0 -> (if (updated.left <= .001f) 1 else 0) or (if (updated.top <= .001f) 2 else 0)
+                                    1 -> (if (updated.right >= .999f) 1 else 0) or (if (updated.top <= .001f) 2 else 0)
+                                    2 -> (if (updated.right >= .999f) 1 else 0) or (if (updated.bottom >= .999f) 2 else 0)
+                                    else -> (if (updated.left <= .001f) 1 else 0) or (if (updated.bottom >= .999f) 2 else 0)
+                                }
+                                if (edgeMask != 0 && edgeMask != edgeHapticMask) {
+                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                }
+                                edgeHapticMask = edgeMask
                             }
                         }
                     ) {
@@ -1141,6 +1161,16 @@ private fun ReviewCaptureCropDialog(
                             size = androidx.compose.ui.geometry.Size(right - left, bottom - top),
                             style = Stroke(1.5.dp.toPx())
                         )
+                        // Fixed rule-of-thirds guides make it easier to align
+                        // the crop with screen edges and visible UI elements.
+                        val gridColor = Color.White.copy(alpha = .56f)
+                        val gridStroke = 1.dp.toPx()
+                        for (fraction in listOf(1f / 3f, 2f / 3f)) {
+                            val x = left + (right - left) * fraction
+                            val y = top + (bottom - top) * fraction
+                            drawLine(gridColor, Offset(x, top), Offset(x, bottom), gridStroke)
+                            drawLine(gridColor, Offset(left, y), Offset(right, y), gridStroke)
+                        }
                         listOf(Offset(left, top), Offset(right, top), Offset(right, bottom), Offset(left, bottom)).forEach { point ->
                             // A full-image crop has its border on the edge. Keep the visual handle
                             // inside the canvas so it remains complete and easy to grab.
@@ -1174,9 +1204,7 @@ private fun ReviewCaptureCropDialog(
                     ) { Text("Apply crop", fontWeight = FontWeight.Bold) }
                 }
             }
-            }
         }
-    }
 }
 
 @Composable private fun DiagramScreen(
