@@ -16,14 +16,15 @@ import androidx.room.Transaction
 import androidx.room.Update
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.flowsnap.canvas.InitialCanvasLayout
 import kotlinx.coroutines.flow.Flow
 import java.util.UUID
 
 @Entity(tableName = "flows")
-data class FlowEntity(@PrimaryKey val id: String, val name: String, val createdAt: Long, val updatedAt: Long, val diagramVersion: String = "v1.0", val createdBy: String = "You", val showTitle: Boolean = true, val showVersion: Boolean = true, val showCreatedAt: Boolean = true, val showCreatedBy: Boolean = true, val showAppVersion: Boolean = false, val showMobileStencils: Boolean = true, val connectorColor: Long = 0xFF69B83AL, val preferredRows: Int = 2, val preferredColumns: Int = 5)
+data class FlowEntity(@PrimaryKey val id: String, val name: String, val createdAt: Long, val updatedAt: Long, val diagramVersion: String = "v1.0", val createdBy: String = "You", val showTitle: Boolean = true, val showVersion: Boolean = true, val showCreatedAt: Boolean = true, val showCreatedBy: Boolean = true, val showAppVersion: Boolean = false, val showMobileStencils: Boolean = true, val connectorColor: Long = 0xFF69B83AL, val preferredRows: Int = 2, val preferredColumns: Int = 5, val canvasZoom: Float = 1f, val canvasPanX: Float = 0f, val canvasPanY: Float = 0f)
 
 @Entity(tableName = "screens", foreignKeys = [ForeignKey(entity = FlowEntity::class, parentColumns = ["id"], childColumns = ["flowId"], onDelete = ForeignKey.CASCADE)], indices = [Index("flowId")])
-data class ScreenEntity(@PrimaryKey val id: String, val flowId: String, val imagePath: String, val markerX: Float, val markerY: Float, val position: Int, val createdAt: Long)
+data class ScreenEntity(@PrimaryKey val id: String, val flowId: String, val imagePath: String, val markerX: Float, val markerY: Float, val position: Int, val createdAt: Long, val canvasX: Float = 0f, val canvasY: Float = 0f)
 
 @Entity(tableName = "transitions", foreignKeys = [
     ForeignKey(entity = FlowEntity::class, parentColumns = ["id"], childColumns = ["flowId"], onDelete = ForeignKey.CASCADE),
@@ -81,6 +82,10 @@ interface FlowDao {
     @Update suspend fun updateScreen(screen: ScreenEntity)
     @Query("UPDATE screens SET markerX = :markerX, markerY = :markerY WHERE id = :screenId")
     suspend fun updateScreenMarker(screenId: String, markerX: Float, markerY: Float)
+    @Query("UPDATE screens SET canvasX = :canvasX, canvasY = :canvasY WHERE id = :screenId")
+    suspend fun updateScreenCanvasPosition(screenId: String, canvasX: Float, canvasY: Float)
+    @Query("UPDATE flows SET canvasZoom = :zoom, canvasPanX = :panX, canvasPanY = :panY WHERE id = :flowId")
+    suspend fun updateCanvasViewport(flowId: String, zoom: Float, panX: Float, panY: Float)
     @Query("UPDATE transitions SET fromMarkerX = :markerX, fromMarkerY = :markerY WHERE fromScreenId = :screenId")
     suspend fun updateTransitionMarkersForScreen(screenId: String, markerX: Float, markerY: Float)
     @Query("SELECT COUNT(*) FROM screens WHERE flowId = :flowId") suspend fun screenCount(flowId: String): Int
@@ -109,13 +114,22 @@ interface FlowDao {
     }
 
     @Transaction
+    suspend fun updateCanvasLayout(flowId: String, positions: Map<String, Pair<Float, Float>>) {
+        positions.forEach { (screenId, point) -> updateScreenCanvasPosition(screenId, point.first, point.second) }
+        touchFlow(flowId, System.currentTimeMillis())
+    }
+
+    @Transaction
     suspend fun persistCapture(flowId: String, imagePath: String, markerX: Float, markerY: Float, now: Long): Boolean {
         // The diagram can be deleted while a capture review is open. Checking
         // inside this transaction prevents a foreign-key crash and keeps the
         // unowned capture from appearing in a different flow.
         if (!flowExists(flowId)) return false
         val previous = lastScreen(flowId)
-        val screen = ScreenEntity(UUID.randomUUID().toString(), flowId, imagePath, markerX, markerY, screenCount(flowId), now)
+        val screenPosition = screenCount(flowId)
+        val canvasColumns = flow(flowId)?.preferredColumns ?: InitialCanvasLayout.COLUMNS
+        val canvasPosition = InitialCanvasLayout.positionFor(screenPosition, canvasColumns)
+        val screen = ScreenEntity(UUID.randomUUID().toString(), flowId, imagePath, markerX, markerY, screenPosition, now, canvasPosition.x, canvasPosition.y)
         insertScreen(screen)
         if (previous != null) insertTransition(TransitionEntity(UUID.randomUUID().toString(), flowId, previous.id, screen.id, previous.markerX, previous.markerY, now))
         touchFlow(flowId, now)
@@ -130,7 +144,7 @@ interface FlowDao {
     }
 }
 
-@Database(entities = [FlowEntity::class, ScreenEntity::class, TransitionEntity::class, ScreenshotEditEntity::class], version = 12, exportSchema = true)
+@Database(entities = [FlowEntity::class, ScreenEntity::class, TransitionEntity::class, ScreenshotEditEntity::class], version = 13, exportSchema = true)
 abstract class FlowDatabase : RoomDatabase() {
     abstract fun flowDao(): FlowDao
     companion object {
@@ -206,8 +220,20 @@ abstract class FlowDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_screenshot_edits_screenId` ON `screenshot_edits` (`screenId`)")
             }
         }
+        /** Adds persisted canvas state and gives legacy captures a stable grid layout. */
+        internal val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `flows` ADD COLUMN `canvasZoom` REAL NOT NULL DEFAULT 1.0")
+                db.execSQL("ALTER TABLE `flows` ADD COLUMN `canvasPanX` REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE `flows` ADD COLUMN `canvasPanY` REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE `screens` ADD COLUMN `canvasX` REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE `screens` ADD COLUMN `canvasY` REAL NOT NULL DEFAULT 0.0")
+                // Preserve each flow's existing capture order while assigning a device-independent grid.
+                db.execSQL("UPDATE `screens` SET `canvasX` = (`position` % ${InitialCanvasLayout.COLUMNS}) * ${InitialCanvasLayout.COLUMN_SPACING}, `canvasY` = (`position` / ${InitialCanvasLayout.COLUMNS}) * ${InitialCanvasLayout.ROW_SPACING}")
+            }
+        }
         fun create(context: Context) = Room.databaseBuilder(context.applicationContext, FlowDatabase::class.java, "flowsnap.db")
-            .addMigrations(MIGRATION_4_9, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
+            .addMigrations(MIGRATION_4_9, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
             .build()
     }
 }

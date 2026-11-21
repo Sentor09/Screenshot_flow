@@ -26,6 +26,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.LocalActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -68,14 +69,12 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Save
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -106,6 +105,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.slideInHorizontally
@@ -116,6 +116,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.layout.ContentScale
@@ -124,10 +125,12 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.zIndex
 import androidx.core.graphics.scale
@@ -156,6 +159,16 @@ import androidx.core.graphics.createBitmap
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import com.flowsnap.canvas.CanvasBounds
+import com.flowsnap.canvas.CanvasEdge
+import com.flowsnap.canvas.CanvasNode
+import com.flowsnap.canvas.CanvasPoint
+import com.flowsnap.canvas.CanvasSize
+import com.flowsnap.canvas.CanvasViewport
+import com.flowsnap.canvas.InitialCanvasLayout
+import com.flowsnap.canvas.deriveCanvasEndpoints
+import com.flowsnap.canvas.nearestPointOnCanvasBounds
+import com.flowsnap.canvas.hitTestCanvasNodes
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
@@ -189,6 +202,201 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
         val l = left.coerceIn(0f, .92f); val t = top.coerceIn(0f, .92f)
         return copy(left = l, top = t, right = right.coerceIn(l + .08f, 1f), bottom = bottom.coerceIn(t + .08f, 1f))
     }
+}
+
+/**
+ * Renders the logical flow canvas using the persisted viewport. Interaction is
+ * deliberately supplied in Step 5 so this renderer stays a pure presentation layer.
+ */
+@Composable private fun FlowCanvasRenderer(
+    state: FlowCanvasState,
+    bitmaps: Map<String, androidx.compose.ui.graphics.ImageBitmap>,
+    modifier: Modifier = Modifier,
+    viewport: CanvasViewport = state.viewport
+) = Canvas(modifier) {
+    val flow = state.flow ?: return@Canvas
+    val nodeBounds = state.screens.associate { screen ->
+        val nodeSize = canvasNodeSize(bitmaps[screen.id])
+        screen.id to CanvasBounds(screen.canvasX, screen.canvasY, screen.canvasX + nodeSize.width, screen.canvasY + nodeSize.height)
+    }
+    fun screenPoint(point: CanvasPoint): Offset = viewport.toScreen(point).let { Offset(it.x, it.y) }
+    fun screenBounds(bounds: CanvasBounds): androidx.compose.ui.geometry.Rect {
+        val topLeft = screenPoint(CanvasPoint(bounds.left, bounds.top))
+        val bottomRight = screenPoint(CanvasPoint(bounds.right, bounds.bottom))
+        return androidx.compose.ui.geometry.Rect(topLeft.x, topLeft.y, bottomRight.x, bottomRight.y)
+    }
+    val edges = state.transitions.mapNotNull { transition ->
+        val source = nodeBounds[transition.fromScreenId] ?: return@mapNotNull null
+        val destination = nodeBounds[transition.toScreenId] ?: return@mapNotNull null
+        val start = CanvasPoint(source.left + source.width * transition.fromMarkerX, source.top + source.height * transition.fromMarkerY)
+        Triple(start, nearestPointOnCanvasBounds(start, destination), transition)
+    }
+    val connector = Color(flow.connectorColor.toInt())
+    val endpoints = deriveCanvasEndpoints(state.screens.map { it.id }.toSet(), state.transitions.map { CanvasEdge(it.fromScreenId, it.toScreenId) })
+    state.screens.forEach { screen ->
+        val bounds = nodeBounds.getValue(screen.id)
+        val rect = screenBounds(bounds)
+        drawRect(Color.White, topLeft = rect.topLeft, size = rect.size)
+        bitmaps[screen.id]?.let { image ->
+            drawImage(image, dstOffset = androidx.compose.ui.unit.IntOffset(rect.left.toInt(), rect.top.toInt()), dstSize = androidx.compose.ui.unit.IntSize(rect.width.toInt().coerceAtLeast(1), rect.height.toInt().coerceAtLeast(1)), filterQuality = FilterQuality.High)
+        } ?: run {
+            drawRect(Color(0xFFE2E8F0), topLeft = rect.topLeft, size = rect.size)
+            drawCircle(Color(0xFF64748B), radius = 18f, center = rect.center)
+            drawCircle(Color.White, radius = 5f, center = rect.center)
+        }
+        drawRect(Color(0xFF475569), topLeft = rect.topLeft, size = rect.size, style = Stroke(2f))
+        val label = when {
+            screen.id in endpoints.startNodeIds && screen.id in endpoints.endNodeIds -> "START / END"
+            screen.id in endpoints.startNodeIds -> "START"
+            screen.id in endpoints.endNodeIds -> "END"
+            else -> null
+        }
+        label?.let {
+            val badgeColor = when (it) {
+                "START" -> Color(0xFF15803D)
+                "END" -> Color(0xFFDC2626)
+                else -> Color(0xFF6D28D9)
+            }
+            val badgeWidth = when (it) {
+                "START / END" -> 104f
+                "START" -> 64f
+                else -> 54f
+            }
+            val badgeTopLeft = Offset(rect.left + 8f, rect.top + 8f)
+            drawRoundRect(badgeColor, topLeft = badgeTopLeft, size = androidx.compose.ui.geometry.Size(badgeWidth, 26f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(13f, 13f))
+            drawCircle(Color.White.copy(alpha = .9f), radius = 4f, center = Offset(badgeTopLeft.x + 12f, badgeTopLeft.y + 13f))
+            drawContext.canvas.nativeCanvas.drawText(it, badgeTopLeft.x + 21f, badgeTopLeft.y + 17f, android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.WHITE; textSize = 11f; typeface = android.graphics.Typeface.DEFAULT_BOLD })
+        }
+    }
+    if (flow.showMobileStencils) edges.forEach { (start, _, _) ->
+        val marker = screenPoint(start)
+        drawCircle(Color.White, 8f, marker)
+        drawCircle(connector, 5f, marker)
+    }
+}
+
+/** Interactive shell for the renderer. A selected node drags; every other one-finger gesture pans. */
+@Composable private fun InteractiveFlowCanvas(
+    state: FlowCanvasState,
+    bitmaps: Map<String, androidx.compose.ui.graphics.ImageBitmap>,
+    vm: FlowViewModel,
+    onOpenScreen: (ScreenEntity) -> Unit,
+    command: CanvasCommand?,
+    onCommandHandled: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var viewport by remember(state.flow?.id) { mutableStateOf(state.viewport) }
+    var selectedId by remember(state.flow?.id) { mutableStateOf<String?>(null) }
+    var positions by remember(state.screens) { mutableStateOf(state.screens.associate { it.id to CanvasPoint(it.canvasX, it.canvasY) }) }
+    var canvasSize by remember { mutableStateOf(CanvasSize(0f, 0f)) }
+    val displayScreens = state.screens.map { screen -> positions[screen.id]?.let { screen.copy(canvasX = it.x, canvasY = it.y) } ?: screen }
+    val displayState = state.copy(screens = displayScreens)
+    val nodeModels = displayScreens.map { screen -> CanvasNode(screen.id, CanvasPoint(screen.canvasX, screen.canvasY), canvasNodeSize(bitmaps[screen.id])) }
+    val currentViewport by rememberUpdatedState(viewport)
+    val currentNodes by rememberUpdatedState(nodeModels)
+    val currentScreens by rememberUpdatedState(displayScreens)
+    LaunchedEffect(state.flow?.id, state.screens.size, canvasSize.width, canvasSize.height) {
+        if (canvasSize.width > 0f && canvasSize.height > 0f && state.viewport == CanvasViewport()) {
+            viewport = vm.fitCanvasViewport(displayScreens, bitmaps, canvasSize, padding = 32f)
+        }
+    }
+    // One-time compatibility reflow: canvases created before the column
+    // preference was honored used the fixed five-column default. Only migrate
+    // an untouched default grid, never a user-arranged canvas.
+    LaunchedEffect(state.flow?.id, state.flow?.preferredColumns, state.screens) {
+        val flow = state.flow ?: return@LaunchedEffect
+        val requestedColumns = flow.preferredColumns
+        val usesLegacyGrid = requestedColumns != InitialCanvasLayout.COLUMNS &&
+            state.screens.isNotEmpty() &&
+            state.screens.all { screen ->
+                CanvasPoint(screen.canvasX, screen.canvasY) == InitialCanvasLayout.positionFor(screen.position)
+            } && state.screens.any { screen ->
+                InitialCanvasLayout.positionFor(screen.position, requestedColumns) != InitialCanvasLayout.positionFor(screen.position)
+            }
+        if (usesLegacyGrid) vm.autoLayoutCanvas(flow, state.screens)
+    }
+    LaunchedEffect(command) {
+        when (command) {
+            CanvasCommand.ZoomOut -> viewport = viewport.copy(zoom = (viewport.zoom / 1.25f).coerceAtLeast(.15f))
+            CanvasCommand.ZoomIn -> viewport = viewport.copy(zoom = (viewport.zoom * 1.25f).coerceAtMost(3f))
+            CanvasCommand.Fit -> viewport = vm.fitCanvasViewport(displayScreens, bitmaps, canvasSize)
+            CanvasCommand.Arrange -> state.flow?.let { vm.autoLayoutCanvas(it, displayScreens) }
+            null -> return@LaunchedEffect
+        }
+        state.flow?.let { vm.persistCanvasViewport(it.id, viewport) }
+        onCommandHandled()
+    }
+    Box(modifier) {
+        FlowCanvasRenderer(
+            state = displayState,
+            bitmaps = bitmaps,
+            viewport = viewport,
+            modifier = Modifier.fillMaxSize().onSizeChanged { canvasSize = CanvasSize(it.width.toFloat(), it.height.toFloat()) }
+                .pointerInput(Unit) {
+                    detectTapGestures { tap ->
+                        val hit = hitTestCanvasNodes(CanvasPoint(tap.x, tap.y), currentViewport, currentNodes)?.id
+                        if (hit != null && hit == selectedId) currentScreens.firstOrNull { it.id == hit }?.let(onOpenScreen)
+                        else selectedId = hit
+                    }
+                }
+                .pointerInput(Unit) {
+                    detectTransformGestures { centroid, pan, zoom, _ ->
+                        val activeViewport = currentViewport
+                        val selected = selectedId?.let { id -> currentNodes.firstOrNull { it.id == id } }
+                        val selectedAtGesture = selected?.bounds?.let { activeViewport.toScreen(it.center) }
+                        val movingSelectedNode = zoom == 1f && selectedAtGesture != null &&
+                            kotlin.math.abs(centroid.x - selectedAtGesture.x) <= 180f * activeViewport.zoom &&
+                            kotlin.math.abs(centroid.y - selectedAtGesture.y) <= 340f * activeViewport.zoom
+                        val selectedNodeToMove = selected?.takeIf {
+                            movingSelectedNode
+                        }
+                        if (selectedNodeToMove != null) {
+                            val moved = CanvasPoint(selectedNodeToMove.position.x + pan.x / activeViewport.zoom, selectedNodeToMove.position.y + pan.y / activeViewport.zoom)
+                            positions = positions + (selectedNodeToMove.id to moved)
+                            displayScreens.firstOrNull { it.id == selectedNodeToMove.id }?.let { vm.persistCanvasNodePosition(it, moved) }
+                        } else {
+                            val zoomed = if (zoom == 1f) activeViewport else activeViewport.zoomedAround(CanvasPoint(centroid.x, centroid.y), (activeViewport.zoom * zoom).coerceIn(.15f, 3f))
+                            viewport = zoomed.pannedBy(CanvasPoint(pan.x, pan.y))
+                            state.flow?.let { vm.persistCanvasViewport(it.id, viewport) }
+                        }
+                    }
+                }
+        )
+    }
+}
+
+@Composable private fun SmallCanvasControl(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    Surface(
+        shape = CircleShape,
+        color = Color(0xFF312E81),
+        modifier = Modifier.size(40.dp).clickable(
+            interactionSource = interactionSource,
+            indication = null,
+            onClick = onClick
+        )
+    ) {
+        Box(contentAlignment = Alignment.Center) { Icon(icon, label, tint = Color.White, modifier = Modifier.size(21.dp)) }
+    }
+}
+
+data class FlowCanvasState(
+    val flow: FlowEntity?,
+    val screens: List<ScreenEntity>,
+    val transitions: List<TransitionEntity>,
+    val viewport: CanvasViewport
+)
+private enum class CanvasCommand { ZoomOut, ZoomIn, Fit, Arrange }
+
+private fun canvasNodeSize(image: androidx.compose.ui.graphics.ImageBitmap?): CanvasSize {
+    // Preserve the source aspect ratio, but keep very wide crops inside their
+    // grid column. Reducing both dimensions avoids overlap without stretching
+    // the image or adding a padded phone-shaped frame.
+    val preferredHeight = 711f
+    val maxWidth = 340f
+    val aspect = image?.let { it.width.toFloat() / it.height.toFloat() } ?: (9f / 20f)
+    val height = minOf(preferredHeight, maxWidth / aspect)
+    return CanvasSize(height * aspect, height)
 }
 
 private val Urbanist = FontFamily(
@@ -227,11 +435,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        // Establish edge-to-edge once for the activity. Individual overlays
-        // never toggle this flag, so opening Crop cannot move the screen.
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-        window.statusBarColor = android.graphics.Color.TRANSPARENT
-        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        // enableEdgeToEdge establishes transparent system bars and keeps the
+        // content layout stable while individual overlays are shown.
         WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = true
         restoreReview(savedInstanceState)
         acceptReviewIntent(intent)
@@ -266,6 +471,8 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
     // Keep the gallery query alive for the app lifetime. This prevents a
     // transient empty Home grid when returning from a completed capture.
     val flows = dao.observeAll().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    private val nodePersistenceJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
+    private val viewportPersistenceJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     fun createFlow(open: (FlowEntity) -> Unit) = viewModelScope.launch {
         val preferences = getApplication<android.app.Application>()
             .getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
@@ -322,6 +529,14 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
             updatedAt = System.currentTimeMillis()
         )
         dao.updateFlow(updated)
+        // The column setting controls both the preview and automatic canvas
+        // layout. Preserve manual positions unless the grid setting changed.
+        if (updated.preferredColumns != flow.preferredColumns) {
+            val positions = dao.screensForFlow(flow.id).associate { screen ->
+                screen.id to InitialCanvasLayout.positionFor(screen.position, updated.preferredColumns)
+            }
+            dao.updateCanvasLayout(flow.id, positions.mapValues { it.value.x to it.value.y })
+        }
         onSaved(updated)
     }
     private suspend fun persistCapture(review: CaptureReview) = dao.persistCapture(
@@ -387,6 +602,38 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
     fun screens(flowId: String) = dao.observeScreens(flowId)
     fun transitions(flowId: String) = dao.observeTransitions(flowId)
     fun flow(flowId: String) = dao.observeFlow(flowId)
+    /** Persist the final drag location after movement has been quiet for a short interval. */
+    fun persistCanvasNodePosition(screen: ScreenEntity, position: CanvasPoint) {
+        nodePersistenceJobs.remove(screen.id)?.cancel()
+        nodePersistenceJobs[screen.id] = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            delay(250.milliseconds)
+            dao.updateScreenCanvasPosition(screen.id, position.x, position.y)
+            dao.touchFlow(screen.flowId, System.currentTimeMillis())
+        }
+    }
+
+    /** Persist viewport convenience state without writing for every pan or pinch frame. */
+    fun persistCanvasViewport(flowId: String, viewport: CanvasViewport) {
+        viewportPersistenceJobs.remove(flowId)?.cancel()
+        viewportPersistenceJobs[flowId] = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            delay(250.milliseconds)
+            dao.updateCanvasViewport(flowId, viewport.zoom, viewport.pan.x, viewport.pan.y)
+        }
+    }
+
+    fun autoLayoutCanvas(flow: FlowEntity, screens: List<ScreenEntity>) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        // Keep canvas and preview consistent: arrange captures in the same
+        // preferred-column grid instead of extending a linear flow indefinitely.
+        val positions = screens.associate { screen ->
+            screen.id to InitialCanvasLayout.positionFor(screen.position, flow.preferredColumns)
+        }
+        dao.updateCanvasLayout(flow.id, positions.mapValues { it.value.x to it.value.y })
+    }
+
+    fun fitCanvasViewport(screens: List<ScreenEntity>, bitmaps: Map<String, androidx.compose.ui.graphics.ImageBitmap>, viewportSize: CanvasSize, padding: Float = 48f): CanvasViewport {
+        val bounds = CanvasBounds.enclosing(screens.map { CanvasNode(it.id, CanvasPoint(it.canvasX, it.canvasY), canvasNodeSize(bitmaps[it.id])).bounds })
+        return bounds?.let { CanvasViewport.fit(it, viewportSize, padding, minZoom = .15f, maxZoom = 3f) } ?: CanvasViewport()
+    }
 
     fun cleanupOrphanedCaptures(pendingReviewPath: String?) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
         ScreenshotStorage.deleteUnreferencedFiles(getApplication(), dao.referencedImagePaths().toSet() + listOfNotNull(pendingReviewPath))
@@ -744,7 +991,7 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
 
 @Composable private fun FlowTile(flow: FlowEntity, vm: FlowViewModel, onClick: () -> Unit) {
     val screens by vm.screens(flow.id).collectAsStateWithLifecycle(initialValue = emptyList())
-    // Keep gallery previews readable: one recognisable cover screen plus a
+    // Keep gallery previews readable: one recognizable cover screen plus a
     // small stack communicates a flow without shrinking every screen.
     val previewScreens = screens.take(3)
     val bitmaps = rememberScreenBitmaps(previewScreens, maxDimension = 360)
@@ -846,8 +1093,8 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
 
 @Composable private fun CaptureReviewScreen(review: CaptureReview, vm: FlowViewModel, dismiss: () -> Unit, onFinish: (FlowEntity?) -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val hostActivity = LocalActivity.current
     val returnToCapturedApp = {
-        val activity = context as? Activity
         // Re-attach the overlay before leaving FlowSnap. ACTION_RESUME never
         // opens HOME: Android then exposes the task that was behind this
         // review activity (the exact app/screen the user was capturing).
@@ -856,8 +1103,8 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
         // Let Compose remove the review destination first. Moving the task on
         // the next UI frame avoids a race that can otherwise leave FlowSnap in
         // front of the previous external app on newer Android releases.
-        activity?.window?.decorView?.postDelayed({
-            activity.moveTaskToBack(true)
+        hostActivity?.window?.decorView?.postDelayed({
+            hostActivity.moveTaskToBack(true)
         }, 180L)
     }
     var croppedReview by remember(review) { mutableStateOf(review) }
@@ -867,7 +1114,6 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
     var draggedMarker by remember { mutableStateOf<Offset?>(null) }
     var reviewCanvasSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
     var showCropEditor by remember { mutableStateOf(false) }
-    val hostActivity = context as? Activity
     androidx.compose.runtime.DisposableEffect(showCropEditor, hostActivity) {
         if (!showCropEditor || hostActivity == null) return@DisposableEffect onDispose { }
         val controller = WindowCompat.getInsetsController(hostActivity.window, hostActivity.window.decorView)
@@ -955,7 +1201,7 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                                     ?: ScreenshotBounds(0f, 0f, size.width, size.height)
                                 val (markerX, markerY) = bounds.pointFor(croppedReview.markerX, croppedReview.markerY)
                                 val marker = draggedMarker ?: Offset(markerX, markerY)
-                                // Keep the transition marker deliberately minimal: no label or coloured halo.
+                                // Keep the transition marker deliberately minimal: no label or colored halo.
                                 drawCircle(Color.White, 26f, marker)
                                 drawCircle(Color(0xFF4D4D4D), 9f, marker)
                                 drawLine(Color(0xFF5C5C5C), marker, Offset(size.width, marker.y), 6f)
@@ -1227,6 +1473,8 @@ private fun ReviewCaptureCropOverlay(
         return
     }
     val flow = currentFlow!!
+    var canvasMode by rememberSaveable(flow.id) { mutableStateOf(false) }
+    var canvasCommand by remember { mutableStateOf<CanvasCommand?>(null) }
     var pendingResult by remember { mutableStateOf<androidx.activity.result.ActivityResult?>(null) }
     var showTips by remember { mutableStateOf(false) }
     var captureLaunchInProgress by remember { mutableStateOf(false) }
@@ -1385,14 +1633,38 @@ private fun ReviewCaptureCropOverlay(
         // The diagram is one tall document: screenshots flow downward in five
         // columns and this area scrolls independently of the fixed controls.
         // The padding keeps document content clear of those controls.
-        EditorCircle(Icons.Default.Home, "Home", goBack, modifier = Modifier.align(Alignment.TopStart).padding(20.dp))
-        EditorCircle(Icons.Default.Settings, "Settings", onClick = { showDiagramSettings = true }, enabled = hasScreens, modifier = Modifier.align(Alignment.TopCenter).padding(top = 20.dp))
+        EditorCircle(Icons.Default.Home, "Home", goBack, modifier = Modifier.align(Alignment.TopStart).padding(24.dp))
+        Row(
+            modifier = Modifier.align(Alignment.TopEnd).padding(24.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            EditorDrawableCircle(R.drawable.ic_flow_settings, "Settings", onClick = { showDiagramSettings = true }, enabled = hasScreens)
+            if (hasScreens && !canvasMode) {
+                EditorDrawableCircle(
+                    iconRes = R.drawable.ic_flow_canvas,
+                    label = "Open canvas",
+                    onClick = { canvasMode = true }
+                )
+            }
+            if (hasScreens && canvasMode) {
+                EditorDrawableCircle(
+                    iconRes = R.drawable.ic_flow_cancel,
+                    label = "Close canvas",
+                    onClick = { canvasMode = false }
+                )
+            }
+        }
         if (screens.isEmpty()) Text("Create a diagram with the + option below", Modifier.align(Alignment.Center), color = Color(0xFF4F46E5), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         else {
             DiagramPreview(
                 screens = screens,
                 transitions = transitions,
                 flow = flow,
+                vm = vm,
+                canvasMode = canvasMode,
+                command = canvasCommand,
+                onCommandHandled = { canvasCommand = null },
+                onCommand = { canvasCommand = it },
                 onDeleteScreen = { screen -> vm.deleteScreen(screen) { android.widget.Toast.makeText(context, "Screenshot deleted", android.widget.Toast.LENGTH_SHORT).show() } },
                 onReplaceScreen = { screen ->
                     replacementTarget = screen
@@ -1407,20 +1679,20 @@ private fun ReviewCaptureCropOverlay(
                 // The white card itself stays in this protected viewport. Only
                 // its document content scrolls, so its rounded top and bottom
                 // corners remain visible at every scroll position.
-                modifier = Modifier.align(Alignment.TopCenter)
-                    .padding(top = 108.dp, bottom = 190.dp)
+                modifier = Modifier.align(Alignment.Center)
+                    .padding(vertical = 132.dp)
                     .fillMaxWidth(.90f)
                     .fillMaxHeight()
             )
         }
-        Row(Modifier.align(Alignment.BottomStart).padding(22.dp), horizontalArrangement = Arrangement.spacedBy(26.dp)) {
-            EditorCircle(Icons.Default.Save, "Save", onClick = {
+        Row(Modifier.align(Alignment.BottomStart).padding(24.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            EditorDrawableCircle(R.drawable.ic_flow_save, "Save", onClick = {
                 showExportFormats = true
             }, enabled = hasScreens)
-            EditorCircle(Icons.Default.CloudUpload, "Export PDF", onClick = { exportPdf.launch(exportFileName(flow.name, "pdf")) }, enabled = hasScreens)
-            EditorCircle(Icons.Default.Delete, "Delete diagram", onClick = { showDeleteConfirmation = true })
+            EditorCircle(Icons.Default.PictureAsPdf, "Export PDF", onClick = { exportPdf.launch(exportFileName(flow.name, "pdf")) }, enabled = hasScreens)
+            EditorDrawableCircle(R.drawable.ic_flow_delete, "Delete diagram", onClick = { showDeleteConfirmation = true })
         }
-        Column(Modifier.align(Alignment.BottomEnd).padding(22.dp), verticalArrangement = Arrangement.spacedBy(18.dp), horizontalAlignment = Alignment.End) {
+        Column(Modifier.align(Alignment.BottomEnd).padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp), horizontalAlignment = Alignment.End) {
             EditorCircle(Icons.Default.Add, "Capture", beginCapture, large = true, enabled = !captureLaunchInProgress)
         }
     }
@@ -1695,6 +1967,20 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     onDismiss: () -> Unit,
     onSave: (title: String, version: String, createdBy: String, showTitle: Boolean, showVersion: Boolean, showCreatedAt: Boolean, showCreatedBy: Boolean, showAppVersion: Boolean, showMobileStencils: Boolean, connectorColor: Long, preferredColumns: Int) -> Unit
 ) {
+    val hostActivity = LocalActivity.current
+    // Settings is a focused modal surface. Hiding the system status bar stops
+    // its clock/network icons from showing through the dimmed workspace.
+    androidx.compose.runtime.DisposableEffect(hostActivity) {
+        if (hostActivity == null) return@DisposableEffect onDispose { }
+        val controller = WindowCompat.getInsetsController(hostActivity.window, hostActivity.window.decorView)
+        val previousLightStatusIcons = controller.isAppearanceLightStatusBars
+        controller.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(WindowInsetsCompat.Type.statusBars())
+        onDispose {
+            controller.show(WindowInsetsCompat.Type.statusBars())
+            controller.isAppearanceLightStatusBars = previousLightStatusIcons
+        }
+    }
     var title by remember(flow.id) { mutableStateOf(flow.name) }
     var version by remember(flow.id) { mutableStateOf(flow.diagramVersion) }
     var createdBy by remember(flow.id) { mutableStateOf(flow.createdBy) }
@@ -1713,10 +1999,11 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
         SideEffect {
             (dialogView.parent as? DialogWindowProvider)?.window?.setDimAmount(0.12f)
         }
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Surface(
             // Wrap content naturally so the actions follow the swatches instead
             // of being pushed to the bottom of a near-full-screen dialog.
-            modifier = Modifier.fillMaxWidth(.90f),
+            modifier = Modifier.fillMaxWidth(.90f).offset(y = (-36).dp),
             color = Color.White,
             shape = RoundedCornerShape(20.dp),
             border = BorderStroke(1.dp, Color(0xFFE3E7EF)),
@@ -1786,6 +2073,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
                     }
                 }
             }
+        }
         }
     }
 }
@@ -2024,7 +2312,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
             .background(backgroundColor, RoundedCornerShape(8.dp))
             .border(1.dp, borderColor, RoundedCornerShape(8.dp))
             .hoverable(interactionSource)
-            // The default indication draws the chunky grey block seen in the old UI.
+            // The default indication draws the chunky gray block seen in the old UI.
             .clickable(interactionSource = interactionSource, indication = null, enabled = onClick != null) { onClick?.invoke() },
         contentAlignment = Alignment.Center
     ) { if (included) Text("✓", color = Color(0xFF4F46E5), fontSize = 20.sp, fontWeight = FontWeight.Bold) }
@@ -2072,10 +2360,44 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 }
 
 private fun Modifier.diagramGrid() = this.drawBehind {
-    drawRect(Color(0xFFF1F1F1))
-    val spacing = 105f
-    var x = 0f; while (x <= size.width) { drawLine(Color.White, Offset(x, 0f), Offset(x, size.height), 3f); x += spacing }
-    var y = 0f; while (y <= size.height) { drawLine(Color.White, Offset(0f, y), Offset(size.width, y), 3f); y += spacing }
+    // Fine graph-paper grid: it gives the editor structure without competing
+    // with the screenshots. Every fourth line is a gentle visual guide.
+    drawRect(
+        Brush.linearGradient(
+            colors = listOf(Color(0xFFF8FAFE), Color(0xFFF1F4FA)),
+            start = Offset.Zero,
+            end = Offset(size.width, size.height)
+        )
+    )
+    val spacing = 54f
+    val minor = Color(0xFFDCE3EF).copy(alpha = .72f)
+    val major = Color(0xFFC5D0E2).copy(alpha = .70f)
+    var x = 0f
+    var column = 0
+    while (x <= size.width) {
+        val isMajor = column % 4 == 0
+        drawLine(
+            color = if (isMajor) major else minor,
+            start = Offset(x, 0f),
+            end = Offset(x, size.height),
+            strokeWidth = if (isMajor) 1.5f else 0.8f
+        )
+        x += spacing
+        column++
+    }
+    var y = 0f
+    var row = 0
+    while (y <= size.height) {
+        val isMajor = row % 4 == 0
+        drawLine(
+            color = if (isMajor) major else minor,
+            start = Offset(0f, y),
+            end = Offset(size.width, y),
+            strokeWidth = if (isMajor) 1.5f else 0.8f
+        )
+        y += spacing
+        row++
+    }
 }
 
 /**
@@ -3084,10 +3406,26 @@ private fun openPdfPreview(context: Context, uri: Uri) {
     Surface(modifier = modifier.size(size), shape = CircleShape, color = Color.Transparent, border = BorderStroke(if (large) 3.dp else 2.dp, tint)) { Box(Modifier.fillMaxSize().clip(CircleShape).clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) { Icon(icon, label, tint = tint, modifier = Modifier.size(if (large) 42.dp else 27.dp)) } }
 }
 
+/** Renders the supplied Android Studio vector assets in the existing editor control style. */
+@Composable private fun EditorDrawableCircle(iconRes: Int, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, large: Boolean = false, enabled: Boolean = true) {
+    val size = if (large) 74.dp else 48.dp
+    val tint = if (enabled) Color(0xFF4F46E5) else Color(0xFFB8B8B8)
+    Surface(modifier = modifier.size(size), shape = CircleShape, color = Color.Transparent, border = BorderStroke(if (large) 3.dp else 2.dp, tint)) {
+        Box(Modifier.fillMaxSize().clip(CircleShape).clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) {
+            Icon(painterResource(iconRes), label, tint = tint, modifier = Modifier.size(if (large) 42.dp else 27.dp))
+        }
+    }
+}
+
 @Composable private fun DiagramPreview(
     screens: List<ScreenEntity>,
     transitions: List<TransitionEntity>,
     flow: FlowEntity,
+    vm: FlowViewModel,
+    canvasMode: Boolean,
+    command: CanvasCommand?,
+    onCommandHandled: () -> Unit,
+    onCommand: (CanvasCommand) -> Unit,
     onDeleteScreen: (ScreenEntity) -> Unit,
     onReplaceScreen: (ScreenEntity) -> Unit,
     onUpdatePointer: (ScreenEntity, Float, Float) -> Unit,
@@ -3096,35 +3434,46 @@ private fun openPdfPreview(context: Context, uri: Uri) {
 ) {
     val bitmaps = rememberScreenBitmaps(screens, maxDimension = 1600)
     var selectedScreen by remember { mutableStateOf<ScreenEntity?>(null) }
-    // Keep the diagram in a scrollable document while respecting the
-    // author-selected number of screenshots in each row.
     val columns = flow.preferredColumns.coerceIn(1, screens.size.coerceAtLeast(1))
     val rows = (screens.size + columns - 1) / columns
-    val canvasHeight = (rows * 132).dp
-    val contentScroll = rememberScrollState()
+    val previewHeight = (rows * 132).dp
+    Column(modifier) {
     Card(
-        modifier = modifier,
+        modifier = Modifier.fillMaxWidth().weight(1f),
         colors = CardDefaults.cardColors(containerColor = Color.White),
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
         Column(Modifier.padding(12.dp).fillMaxSize()) {
-            // This viewport clips only the document body. The Card remains
-            // stationary and keeps its rounded outline while the user scrolls.
             Box(Modifier.fillMaxWidth().weight(1f).clipToBounds()) {
-                Box(Modifier.fillMaxSize().verticalScroll(contentScroll)) {
-                    FlowDiagramCanvas(
-                        screens = screens,
-                        transitions = transitions,
+                if (canvasMode) {
+                    InteractiveFlowCanvas(
+                        state = FlowCanvasState(flow, screens, transitions, CanvasViewport(flow.canvasZoom, CanvasPoint(flow.canvasPanX, flow.canvasPanY))),
                         bitmaps = bitmaps,
-                        showMobileStencils = flow.showMobileStencils,
-                        connectorColor = Color(flow.connectorColor.toInt()),
-                        columnsOverride = columns,
-                        onScreenClick = {
+                        vm = vm,
+                        onOpenScreen = {
                             selectedScreen = it
                             onLightboxVisibilityChange(true)
                         },
-                        modifier = Modifier.fillMaxWidth().height(canvasHeight)
+                        command = command,
+                        onCommandHandled = onCommandHandled,
+                        modifier = Modifier.fillMaxSize()
                     )
+                } else {
+                    Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                        FlowDiagramCanvas(
+                            screens = screens,
+                            transitions = transitions,
+                            bitmaps = bitmaps,
+                            showMobileStencils = flow.showMobileStencils,
+                            connectorColor = Color(flow.connectorColor.toInt()),
+                            columnsOverride = columns,
+                            onScreenClick = {
+                                selectedScreen = it
+                                onLightboxVisibilityChange(true)
+                            },
+                            modifier = Modifier.fillMaxWidth().height(previewHeight)
+                        )
+                    }
                 }
             }
             val metadata = buildList {
@@ -3134,7 +3483,7 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                 if (flow.showCreatedBy) add("Created by" to flow.createdBy)
                 if (flow.showAppVersion) add("App version" to "v1.0")
             }
-            if (metadata.isNotEmpty()) {
+            if (!canvasMode && metadata.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 Row(Modifier.fillMaxWidth().background(Color(0xFFF8F8F8)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                     metadata.forEach { (label, value) ->
@@ -3164,6 +3513,16 @@ private fun openPdfPreview(context: Context, uri: Uri) {
                 screens.getOrNull(currentIndex + direction)?.let { selectedScreen = it }
             }
         )
+    }
+    if (canvasMode) {
+        Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.Center) {
+            SmallCanvasControl(Icons.Default.Remove, "Zoom out") { onCommand(CanvasCommand.ZoomOut) }
+            Spacer(Modifier.width(8.dp))
+            SmallCanvasControl(Icons.Default.Add, "Zoom in") { onCommand(CanvasCommand.ZoomIn) }
+            Spacer(Modifier.width(8.dp))
+            SmallCanvasControl(Icons.Default.Apps, "Fit flow") { onCommand(CanvasCommand.Fit) }
+        }
+    }
     }
 }
 
@@ -3209,7 +3568,7 @@ private fun fittedScreenshotRectInPadding(
     onSlide: (Int) -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val hostActivity = context as? Activity
+    val hostActivity = LocalActivity.current
     // The viewer owns a dark visual layer, including its system bars, until it
     // is dismissed. The host's regular light appearance is restored afterward.
     androidx.compose.runtime.DisposableEffect(hostActivity) {
