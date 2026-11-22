@@ -6,6 +6,7 @@ import android.app.Activity
 import android.Manifest
 import android.content.pm.PackageManager
 import android.content.Context
+import android.content.res.Configuration
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
 import android.content.Intent
@@ -106,6 +107,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.SideEffect
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.AnimatedContent
@@ -132,9 +134,12 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.zIndex
 import androidx.core.graphics.scale
+import androidx.core.graphics.drawable.toDrawable
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.Font
@@ -211,7 +216,10 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
     bitmaps: Map<String, androidx.compose.ui.graphics.ImageBitmap>,
     modifier: Modifier = Modifier,
     viewport: CanvasViewport = state.viewport
-) = Canvas(modifier) {
+) {
+    val colors = MaterialTheme.colorScheme
+    val extra = LocalFlowSnapExtraColors.current
+    Canvas(modifier) {
     val flow = state.flow ?: return@Canvas
     val nodeBounds = state.screens.associate { screen ->
         val nodeSize = canvasNodeSize(bitmaps[screen.id])
@@ -234,15 +242,15 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
     state.screens.forEach { screen ->
         val bounds = nodeBounds.getValue(screen.id)
         val rect = screenBounds(bounds)
-        drawRect(Color.White, topLeft = rect.topLeft, size = rect.size)
+        drawRect(colors.surface, topLeft = rect.topLeft, size = rect.size)
         bitmaps[screen.id]?.let { image ->
             drawImage(image, dstOffset = androidx.compose.ui.unit.IntOffset(rect.left.toInt(), rect.top.toInt()), dstSize = androidx.compose.ui.unit.IntSize(rect.width.toInt().coerceAtLeast(1), rect.height.toInt().coerceAtLeast(1)), filterQuality = FilterQuality.High)
         } ?: run {
-            drawRect(Color(0xFFE2E8F0), topLeft = rect.topLeft, size = rect.size)
-            drawCircle(Color(0xFF64748B), radius = 18f, center = rect.center)
-            drawCircle(Color.White, radius = 5f, center = rect.center)
+            drawRect(extra.screenshotPlaceholder, topLeft = rect.topLeft, size = rect.size)
+            drawCircle(extra.screenshotPlaceholderIcon, radius = 18f, center = rect.center)
+            drawCircle(colors.onPrimary, radius = 5f, center = rect.center)
         }
-        drawRect(Color(0xFF475569), topLeft = rect.topLeft, size = rect.size, style = Stroke(2f))
+        drawRect(extra.canvasNodeBorder, topLeft = rect.topLeft, size = rect.size, style = Stroke(2f))
         val label = when {
             screen.id in endpoints.startNodeIds && screen.id in endpoints.endNodeIds -> "START / END"
             screen.id in endpoints.startNodeIds -> "START"
@@ -251,9 +259,9 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
         }
         label?.let {
             val badgeColor = when (it) {
-                "START" -> Color(0xFF15803D)
-                "END" -> Color(0xFFDC2626)
-                else -> Color(0xFF6D28D9)
+                "START" -> colors.tertiary
+                "END" -> colors.error
+                else -> colors.primary
             }
             val badgeWidth = when (it) {
                 "START / END" -> 104f
@@ -262,14 +270,15 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
             }
             val badgeTopLeft = Offset(rect.left + 8f, rect.top + 8f)
             drawRoundRect(badgeColor, topLeft = badgeTopLeft, size = androidx.compose.ui.geometry.Size(badgeWidth, 26f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(13f, 13f))
-            drawCircle(Color.White.copy(alpha = .9f), radius = 4f, center = Offset(badgeTopLeft.x + 12f, badgeTopLeft.y + 13f))
-            drawContext.canvas.nativeCanvas.drawText(it, badgeTopLeft.x + 21f, badgeTopLeft.y + 17f, android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.WHITE; textSize = 11f; typeface = android.graphics.Typeface.DEFAULT_BOLD })
+            drawCircle(colors.onPrimary.copy(alpha = .9f), radius = 4f, center = Offset(badgeTopLeft.x + 12f, badgeTopLeft.y + 13f))
+            drawContext.canvas.nativeCanvas.drawText(it, badgeTopLeft.x + 21f, badgeTopLeft.y + 17f, android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = colors.onPrimary.toArgb(); textSize = 11f; typeface = android.graphics.Typeface.DEFAULT_BOLD })
         }
     }
     if (flow.showMobileStencils) edges.forEach { (start, _, _) ->
         val marker = screenPoint(start)
-        drawCircle(Color.White, 8f, marker)
+        drawCircle(colors.onPrimary, 8f, marker)
         drawCircle(connector, 5f, marker)
+    }
     }
 }
 
@@ -367,14 +376,14 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
     val interactionSource = remember { MutableInteractionSource() }
     Surface(
         shape = CircleShape,
-        color = Color(0xFF312E81),
+        color = UiColor.secondary,
         modifier = Modifier.size(40.dp).clickable(
             interactionSource = interactionSource,
             indication = null,
             onClick = onClick
         )
     ) {
-        Box(contentAlignment = Alignment.Center) { Icon(icon, label, tint = Color.White, modifier = Modifier.size(21.dp)) }
+        Box(contentAlignment = Alignment.Center) { Icon(icon, label, tint = UiColor.onSecondary, modifier = Modifier.size(21.dp)) }
     }
 }
 
@@ -431,8 +440,20 @@ class MainActivity : ComponentActivity() {
             acceptReviewIntent(intent)
         }
     }
+    @Suppress("DEPRECATION") // Fallback colors for devices with opaque system-bar regions.
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val storedTheme = getSharedPreferences(APP_SETTINGS, MODE_PRIVATE).getString(PREF_THEME_MODE, null)
+        val launchUsesDarkTheme = when (storedTheme) {
+            THEME_DARK -> true
+            THEME_LIGHT -> false
+            else -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        }
+        window.setBackgroundDrawable(
+            (if (launchUsesDarkTheme) FlowSnapDarkColorScheme.background else FlowSnapLightColorScheme.background)
+                .toArgb()
+                .toDrawable()
+        )
         enableEdgeToEdge()
         // enableEdgeToEdge establishes transparent system bars and keeps the
         // content layout stable while individual overlays are shown.
@@ -440,7 +461,34 @@ class MainActivity : ComponentActivity() {
         restoreReview(savedInstanceState)
         acceptReviewIntent(intent)
         ContextCompat.registerReceiver(this, captureReadyReceiver, IntentFilter(CaptureService.ACTION_CAPTURE_READY), ContextCompat.RECEIVER_NOT_EXPORTED)
-        setContent { MaterialTheme(typography = FlowSnapTypography) { FlowSnapApp(review = review, dismissReview = { review = null }) } }
+        setContent {
+            val systemDarkTheme = isSystemInDarkTheme()
+            val themePreferences = remember { getSharedPreferences(APP_SETTINGS, MODE_PRIVATE) }
+            var useDarkTheme by remember {
+                mutableStateOf(themePreferences.getString(PREF_THEME_MODE, null)?.equals(THEME_DARK) ?: systemDarkTheme)
+            }
+            val colorScheme = if (useDarkTheme) FlowSnapDarkColorScheme else FlowSnapLightColorScheme
+            val extraColors = if (useDarkTheme) FlowSnapDarkExtraColors else FlowSnapLightExtraColors
+            SideEffect {
+                window.statusBarColor = colorScheme.background.toArgb()
+                window.navigationBarColor = colorScheme.background.toArgb()
+                WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = !useDarkTheme
+                WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightNavigationBars = !useDarkTheme
+            }
+            MaterialTheme(colorScheme = colorScheme, typography = FlowSnapTypography) {
+                CompositionLocalProvider(LocalFlowSnapExtraColors provides extraColors) {
+                    FlowSnapApp(
+                        review = review,
+                        dismissReview = { review = null },
+                        useDarkTheme = useDarkTheme,
+                        onThemeChange = { darkTheme ->
+                            useDarkTheme = darkTheme
+                            themePreferences.edit { putString(PREF_THEME_MODE, if (darkTheme) THEME_DARK else THEME_LIGHT) }
+                        }
+                    )
+                }
+            }
+        }
     }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); acceptReviewIntent(intent) }
     private fun acceptReviewIntent(intent: Intent) { val path = intent.getStringExtra(CaptureService.EXTRA_PATH) ?: return; review = CaptureReview(intent.getStringExtra(CaptureService.EXTRA_FLOW_ID).orEmpty(), path, intent.getFloatExtra(CaptureService.EXTRA_MARKER_X, .5f), intent.getFloatExtra(CaptureService.EXTRA_MARKER_Y, .5f)) }
@@ -481,7 +529,7 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
             createdAt = now,
             updatedAt = now,
             showMobileStencils = true,
-            connectorColor = preferences.getLong(PREF_CONNECTOR_COLOR, 0xFF69B83AL)
+            connectorColor = preferences.getLong(PREF_CONNECTOR_COLOR, ConnectorPalette.Green)
         )
         dao.insertFlow(flow)
         open(flow)
@@ -690,9 +738,18 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
 private const val APP_SETTINGS = "flowsnap_settings"
 private const val PREF_DEFAULT_FLOW_NAME = "default_flow_name"
 private const val PREF_CONNECTOR_COLOR = "connector_color"
+private const val PREF_THEME_MODE = "theme_mode"
+private const val THEME_LIGHT = "light"
+private const val THEME_DARK = "dark"
 
-@Composable private fun FlowSnapApp(review: CaptureReview?, dismissReview: () -> Unit, vm: FlowViewModel = viewModel()) {
-    Box(Modifier.fillMaxSize().background(Color.White)) {
+@Composable private fun FlowSnapApp(
+    review: CaptureReview?,
+    dismissReview: () -> Unit,
+    useDarkTheme: Boolean,
+    onThemeChange: (Boolean) -> Unit,
+    vm: FlowViewModel = viewModel()
+) {
+    Box(Modifier.fillMaxSize().background(UiColor.surface)) {
         var selectedFlowId by rememberSaveable { mutableStateOf<String?>(null) }
         var settingsOpen by rememberSaveable { mutableStateOf(false) }
         var lightboxOpen by remember { mutableStateOf(false) }
@@ -701,7 +758,11 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
             if (savedFlow != null) selectedFlowId = savedFlow.id
             dismissReview()
         }) else if (settingsOpen) {
-            AppSettingsScreen(close = { settingsOpen = false })
+            AppSettingsScreen(
+                useDarkTheme = useDarkTheme,
+                onThemeChange = onThemeChange,
+                close = { settingsOpen = false }
+            )
         } else if (selectedFlowId == null) {
             HomeScreen(vm, openSettings = { settingsOpen = true }) { selectedFlowId = it.id }
         } else {
@@ -723,7 +784,7 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                 .windowInsetsTopHeight(WindowInsets.statusBars)
                 // The dialog dim layer makes this render as the requested
                 // near-black #1A1A1A while a screenshot preview is open.
-                .background(if (lightboxOpen) Color(0xFF2A2A2A) else Color.White)
+                .background(if (lightboxOpen) UiColor.extra.darkOutline else UiColor.surface)
                 .zIndex(10f)
         )
     }
@@ -736,7 +797,7 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
 ) {
     val flows by vm.flows.collectAsStateWithLifecycle()
     // Keep gallery cards above the Android gesture/three-button navigation area.
-    Column(Modifier.fillMaxSize().background(Color(0xFFF5F5F5)).windowInsetsPadding(WindowInsets.systemBars)) {
+    Column(Modifier.fillMaxSize().background(UiColor.background).windowInsetsPadding(WindowInsets.systemBars)) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -744,19 +805,19 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                 .zIndex(1f)
                 .shadow(
                     elevation = 6.dp,
-                    ambientColor = Color.Transparent,
-                    spotColor = Color(0x4D000000)
+                    ambientColor = UiColor.transparent,
+                    spotColor = UiColor.onSurface.copy(alpha = .30f)
                 )
-                .background(Color.White)
+                .background(UiColor.surface)
                 .padding(horizontal = 18.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(Modifier.size(44.dp).clip(CircleShape).clickable(onClick = openSettings), contentAlignment = Alignment.Center) {
-                Icon(Icons.Default.Menu, contentDescription = "Settings", modifier = Modifier.size(28.dp), tint = Color(0xFF656565))
+                Icon(Icons.Default.Menu, contentDescription = "Settings", modifier = Modifier.size(28.dp), tint = UiColor.onSurfaceVariant)
             }
             Spacer(Modifier.width(20.dp))
-            Text("Flow", color = Color(0xFF312E81), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Light, maxLines = 1)
-            Text("Snap", color = Color(0xFF4F46E5), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Light, maxLines = 1)
+            Text("Flow", color = UiColor.secondary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Light, maxLines = 1)
+            Text("Snap", color = UiColor.primary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Light, maxLines = 1)
             Spacer(Modifier.weight(1f))
         }
         LazyVerticalGrid(
@@ -778,23 +839,27 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
     }
 }
 
-@Composable private fun AppSettingsScreen(close: () -> Unit) {
+@Composable private fun AppSettingsScreen(
+    useDarkTheme: Boolean,
+    onThemeChange: (Boolean) -> Unit,
+    close: () -> Unit
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val preferences = remember { context.getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE) }
     var defaultFlowName by remember { mutableStateOf(preferences.getString(PREF_DEFAULT_FLOW_NAME, "My new app flow").orEmpty()) }
-    var connectorColor by remember { mutableLongStateOf(preferences.getLong(PREF_CONNECTOR_COLOR, 0xFF69B83AL)) }
+    var connectorColor by remember { mutableLongStateOf(preferences.getLong(PREF_CONNECTOR_COLOR, ConnectorPalette.Green)) }
     var showColorPicker by remember { mutableStateOf(false) }
     val colorOptions = listOf(
-        0xFF69B83AL to "Green", 0xFF4F46E5L to "Indigo", 0xFFE05252L to "Red",
-        0xFFF39C12L to "Orange", 0xFF00A6A6L to "Teal", 0xFF8E44ADL to "Purple"
+        ConnectorPalette.Green to "Green", ConnectorPalette.Indigo to "Indigo", ConnectorPalette.Red to "Red",
+        ConnectorPalette.Orange to "Orange", ConnectorPalette.Teal to "Teal", ConnectorPalette.Purple to "Purple"
     )
-    val primaryBlue = Color(0xFF4F46E5)
+    val primaryBlue = UiColor.primary
 
     Column(
-        Modifier.fillMaxSize().background(Color(0xFFF5F6FA)).windowInsetsPadding(WindowInsets.systemBars)
+        Modifier.fillMaxSize().background(UiColor.background).windowInsetsPadding(WindowInsets.systemBars)
     ) {
         Row(
-            Modifier.fillMaxWidth().height(64.dp).background(Color.White).padding(horizontal = 18.dp),
+            Modifier.fillMaxWidth().height(64.dp).background(UiColor.surface).padding(horizontal = 18.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
@@ -804,20 +869,36 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = "Back",
-                    tint = Color(0xFF312E81),
+                    tint = UiColor.secondary,
                     modifier = Modifier.size(26.dp)
                 )
             }
             Spacer(Modifier.width(10.dp))
-            Text("Settings", style = MaterialTheme.typography.titleLarge, color = Color(0xFF1F2D43), fontWeight = FontWeight.SemiBold)
+            Text("Settings", style = MaterialTheme.typography.titleLarge, color = UiColor.onSurface, fontWeight = FontWeight.SemiBold)
         }
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 18.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            SettingsSectionLabel("APPEARANCE")
+            SettingsCard {
+                ThemeOption(
+                    title = "Light theme",
+                    subtitle = "White surfaces and high-contrast text",
+                    selected = !useDarkTheme,
+                    onClick = { onThemeChange(false) }
+                )
+                ThemeOption(
+                    title = "Dark theme",
+                    subtitle = "Dark surfaces for low-light viewing",
+                    selected = useDarkTheme,
+                    onClick = { onThemeChange(true) }
+                )
+            }
+
             SettingsSectionLabel("NEW DIAGRAM DEFAULTS")
             SettingsCard {
-                Text("Default flow name", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF202B3B))
+                Text("Default flow name", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = UiColor.onSurface)
                 Spacer(Modifier.height(10.dp))
                 CompositionLocalProvider(
                     LocalTextSelectionColors provides TextSelectionColors(
@@ -830,21 +911,21 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                         onValueChange = { defaultFlowName = it },
                         singleLine = true,
                         cursorBrush = SolidColor(primaryBlue),
-                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 15.sp, color = Color(0xFF202B3B)),
-                        modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFFD7DEEA), RoundedCornerShape(10.dp)).padding(horizontal = 14.dp, vertical = 12.dp)
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 15.sp, color = UiColor.onSurface),
+                        modifier = Modifier.fillMaxWidth().border(1.dp, UiColor.outline, RoundedCornerShape(10.dp)).padding(horizontal = 14.dp, vertical = 12.dp)
                     )
                 }
                 Spacer(Modifier.height(16.dp))
                 SettingsActionRow(
                     title = "Default connector color",
-                    trailing = { Box(Modifier.size(24.dp).background(Color(connectorColor.toInt()), CircleShape).border(1.dp, Color(0x22000000), CircleShape)) },
+                    trailing = { Box(Modifier.size(24.dp).background(Color(connectorColor.toInt()), CircleShape).border(1.dp, UiColor.onSurface.copy(alpha = .13f), CircleShape)) },
                     onClick = { showColorPicker = true }
                 )
             }
 
             SettingsSectionLabel("ABOUT")
             SettingsCard {
-                SettingsActionRow("FlowSnap", trailing = { Text("Version 1.0", fontSize = 13.sp, color = Color(0xFF718096)) })
+                SettingsActionRow("FlowSnap", trailing = { Text("Version 1.0", fontSize = 13.sp, color = UiColor.onSurfaceVariant) })
             }
 
             SettingsSectionLabel("SUPPORT")
@@ -891,17 +972,17 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
         ) {
             Surface(
                 modifier = Modifier.fillMaxWidth(.86f),
-                color = Color.White,
+                color = UiColor.surface,
                 shape = RoundedCornerShape(28.dp),
                 shadowElevation = 18.dp
             ) {
                 Column(Modifier.padding(horizontal = 24.dp, vertical = 22.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Connector color", modifier = Modifier.weight(1f), fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF202B3B))
+                        Text("Connector color", modifier = Modifier.weight(1f), fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = UiColor.onSurface)
                         Box(
-                            Modifier.size(36.dp).background(Color(0xFFF1F3F8), CircleShape).clickable { showColorPicker = false },
+                            Modifier.size(36.dp).background(UiColor.surfaceVariant, CircleShape).clickable { showColorPicker = false },
                             contentAlignment = Alignment.Center
-                        ) { Icon(Icons.Default.Close, contentDescription = "Close color picker", tint = Color(0xFF526177), modifier = Modifier.size(20.dp)) }
+                        ) { Icon(Icons.Default.Close, contentDescription = "Close color picker", tint = UiColor.onSurfaceVariant, modifier = Modifier.size(20.dp)) }
                     }
                     Spacer(Modifier.height(18.dp))
                     colorOptions.chunked(3).forEachIndexed { rowIndex, row ->
@@ -915,11 +996,11 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                                         Modifier.size(50.dp)
                                             .clip(CircleShape)
                                             .background(Color(color.toInt()), CircleShape)
-                                            .border(if (color == connectorColor) 4.dp else 0.dp, if (color == connectorColor) Color(0xFF1F2D43) else Color.Transparent, CircleShape)
+                                            .border(if (color == connectorColor) 4.dp else 0.dp, if (color == connectorColor) UiColor.onSurface else UiColor.transparent, CircleShape)
                                             .clickable { connectorColor = color },
                                         contentAlignment = Alignment.Center
                                     ) {
-                                        if (color == connectorColor) Icon(Icons.Default.Check, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(25.dp))
+                                        if (color == connectorColor) Icon(Icons.Default.Check, contentDescription = "Selected", tint = UiColor.onPrimary, modifier = Modifier.size(25.dp))
                                     }
                                 }
                             }
@@ -940,12 +1021,37 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
 }
 
 @Composable private fun SettingsSectionLabel(label: String) {
-    Text(label, color = Color(0xFF64748B), fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = .8.sp, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
+    Text(label, color = UiColor.onSurfaceVariant, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = .8.sp, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
 }
 
 @Composable private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
-    Surface(color = Color.White, shape = RoundedCornerShape(18.dp), shadowElevation = 2.dp) {
+    Surface(color = UiColor.surface, shape = RoundedCornerShape(18.dp), shadowElevation = 2.dp) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), content = content)
+    }
+}
+
+@Composable private fun ThemeOption(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier.size(22.dp).border(2.dp, if (selected) UiColor.primary else UiColor.outline, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            if (selected) Box(Modifier.size(12.dp).background(UiColor.primary, CircleShape))
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, color = UiColor.onSurface, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(subtitle, color = UiColor.onSurfaceVariant, fontSize = 12.sp)
+        }
     }
 }
 
@@ -956,7 +1062,7 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
     }.padding(vertical = 4.dp)
     Row(rowModifier, verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF202B3B))
+            Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = UiColor.onSurface)
         }
         Spacer(Modifier.width(10.dp))
         trailing()
@@ -973,11 +1079,11 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF202B3B))
+            Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = UiColor.onSurface)
             Spacer(Modifier.height(3.dp))
-            Text(subtitle, fontSize = 12.sp, color = Color(0xFF718096))
+            Text(subtitle, fontSize = 12.sp, color = UiColor.onSurfaceVariant)
         }
-        Text("›", fontSize = 26.sp, color = Color(0xFF94A3B8))
+        Text("›", fontSize = 26.sp, color = UiColor.onSurfaceVariant)
     }
 }
 
@@ -987,24 +1093,24 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
     shape = RoundedCornerShape(20.dp),
     // Match the preview card: a subtle neutral edge softens the elevated
     // surface without reintroducing the previous violet outline.
-    border = BorderStroke(1.dp, Color(0xFFE1E7F0)),
+    border = BorderStroke(1.dp, UiColor.outlineVariant),
     elevation = CardDefaults.cardElevation(defaultElevation = 5.dp),
-    colors = CardDefaults.cardColors(containerColor = Color.White)
+    colors = CardDefaults.cardColors(containerColor = UiColor.surface)
 ) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             Surface(
                 modifier = Modifier.size(76.dp),
                 shape = CircleShape,
-                color = Color(0xFF4F46E5),
+                color = UiColor.primary,
                 shadowElevation = 2.dp
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Add, "Create diagram", tint = Color.White, modifier = Modifier.size(42.dp))
+                    Icon(Icons.Default.Add, "Create diagram", tint = UiColor.onPrimary, modifier = Modifier.size(42.dp))
                 }
             }
         }
-        Text("Create diagram", modifier = Modifier.fillMaxWidth(), color = Color(0xFF4F46E5), fontSize = 16.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+        Text("Create diagram", modifier = Modifier.fillMaxWidth(), color = UiColor.primary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
     }
 }
 
@@ -1018,42 +1124,42 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
         onClick = onClick,
         modifier = Modifier.fillMaxWidth().aspectRatio(.72f),
         shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, Color(0xFFE1E7F0)),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(1.dp, UiColor.outlineVariant),
+        colors = CardDefaults.cardColors(containerColor = UiColor.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 5.dp)
     ) {
         Column(Modifier.padding(12.dp).fillMaxSize()) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("FLOW PREVIEW", color = Color(0xFF64748B), fontSize = 8.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
+                Text("FLOW PREVIEW", color = UiColor.onSurfaceVariant, fontSize = 8.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
                 Spacer(Modifier.weight(1f))
-                Surface(color = Color(0xFFEEF2FF), shape = RoundedCornerShape(20.dp)) {
-                    Text("${screens.size} ${if (screens.size == 1) "screen" else "screens"}", Modifier.padding(horizontal = 7.dp, vertical = 3.dp), color = Color(0xFF4F46E5), fontSize = 8.sp, fontWeight = FontWeight.SemiBold)
+                Surface(color = UiColor.primaryContainer, shape = RoundedCornerShape(20.dp)) {
+                    Text("${screens.size} ${if (screens.size == 1) "screen" else "screens"}", Modifier.padding(horizontal = 7.dp, vertical = 3.dp), color = UiColor.primary, fontSize = 8.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
             Spacer(Modifier.height(9.dp))
             Box(
                 Modifier.weight(1f).fillMaxWidth()
-                    .background(Color(0xFFF7F9FC), RoundedCornerShape(12.dp))
-                    .border(1.dp, Color(0xFFE5EAF2), RoundedCornerShape(12.dp))
+                    .background(UiColor.surfaceVariant, RoundedCornerShape(12.dp))
+                    .border(1.dp, UiColor.outlineVariant, RoundedCornerShape(12.dp))
                     .padding(7.dp)
             ) {
                 if (previewScreens.isNotEmpty()) {
                     GalleryFlowPreview(previewScreens, bitmaps)
                 } else {
-                    Text("Your captured flow\nwill appear here", Modifier.align(Alignment.Center), color = Color(0xFF94A3B8), fontSize = 11.sp, textAlign = TextAlign.Center, lineHeight = 15.sp)
+                    Text("Your captured flow\nwill appear here", Modifier.align(Alignment.Center), color = UiColor.onSurfaceVariant, fontSize = 11.sp, textAlign = TextAlign.Center, lineHeight = 15.sp)
                 }
             }
             Text(
                 flow.name,
                 modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
-                color = Color(0xFF312E81),
+                color = UiColor.secondary,
                 fontSize = 15.sp,
                 lineHeight = 18.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
-            Text("Updated ${java.text.SimpleDateFormat("MMM d", java.util.Locale.getDefault()).format(java.util.Date(flow.updatedAt))}", Modifier.padding(top = 0.dp), color = Color(0xFF7B8798), fontSize = 10.sp)
+            Text("Updated ${java.text.SimpleDateFormat("MMM d", java.util.Locale.getDefault()).format(java.util.Date(flow.updatedAt))}", Modifier.padding(top = 0.dp), color = UiColor.onSurfaceVariant, fontSize = 10.sp)
         }
     }
 }
@@ -1094,8 +1200,8 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
     Surface(
         modifier = modifier,
         shape = RoundedCornerShape(7.dp),
-        color = Color(0xFFE2E8F0),
-        border = BorderStroke(1.dp, Color.White),
+        color = UiColor.extra.screenshotPlaceholder,
+        border = BorderStroke(1.dp, UiColor.onPrimary),
         shadowElevation = 1.dp
     ) {
         val bitmap = bitmaps[screen.id]
@@ -1165,8 +1271,10 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
         } else croppedReview
     } ?: croppedReview
     // Keep the review actions above Android's gesture/navigation area.
-    val primaryBlue = Color(0xFF4F46E5)
-    val pageBackground = Color(0xFFF5F6FA)
+    val primaryBlue = UiColor.primary
+    val pageBackground = UiColor.background
+    val markerHalo = UiColor.onPrimary
+    val markerInk = UiColor.onSurfaceVariant
     Box(Modifier.fillMaxSize()) {
         Column(
             Modifier.fillMaxSize().background(pageBackground).windowInsetsPadding(WindowInsets.systemBars),
@@ -1174,7 +1282,7 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
         ) {
         Surface(
             modifier = Modifier.fillMaxWidth(),
-            color = Color.White,
+            color = UiColor.surface,
             shadowElevation = 1.dp
         ) {
             Row(
@@ -1183,8 +1291,8 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("Review capture", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF17171A))
-                    Text("Drag the marker to set the next step", fontSize = 12.sp, color = Color(0xFF6B7280))
+                    Text("Review capture", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = UiColor.onSurface)
+                    Text("Drag the marker to set the next step", fontSize = 12.sp, color = UiColor.onSurfaceVariant)
                 }
                 OutlinedButton(
                     onClick = { showCropEditor = true }, enabled = bitmap != null,
@@ -1198,13 +1306,13 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                 // Keep the capture, marker, and connector together in the same
                 // review canvas; only its surrounding presentation has changed.
                 modifier = Modifier.fillMaxSize(),
-                color = Color.White,
+                color = UiColor.surface,
                 shape = RoundedCornerShape(28.dp),
                 shadowElevation = 10.dp
             ) {
                 Column(Modifier.fillMaxSize()) {
                     Box(Modifier.fillMaxWidth().weight(1f).padding(12.dp)) {
-                        Box(Modifier.fillMaxSize().clip(RoundedCornerShape(18.dp)).background(Color(0xFFE9EEF5))) {
+                        Box(Modifier.fillMaxSize().clip(RoundedCornerShape(18.dp)).background(UiColor.surfaceVariant)) {
                             if (bitmap != null) androidx.compose.foundation.Image(bitmap, "Captured screen", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                             Canvas(Modifier.fillMaxSize().onSizeChanged { reviewCanvasSize = it }.pointerInput(bitmap) { detectDragGestures(onDragStart = { draggedMarker = it }) { change, amount ->
                                 change.consume()
@@ -1221,9 +1329,9 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                                 val (markerX, markerY) = bounds.pointFor(croppedReview.markerX, croppedReview.markerY)
                                 val marker = draggedMarker ?: Offset(markerX, markerY)
                                 // Keep the transition marker deliberately minimal: no label or colored halo.
-                                drawCircle(Color.White, 26f, marker)
-                                drawCircle(Color(0xFF4D4D4D), 9f, marker)
-                                drawLine(Color(0xFF5C5C5C), marker, Offset(size.width, marker.y), 6f)
+                                drawCircle(markerHalo, 26f, marker)
+                                drawCircle(markerInk, 9f, marker)
+                                drawLine(markerInk, marker, Offset(size.width, marker.y), 6f)
                             }
                         }
                     }
@@ -1232,7 +1340,7 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
         }
         Surface(
             modifier = Modifier.fillMaxWidth(),
-            color = Color.White,
+            color = UiColor.surface,
             shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
             shadowElevation = 12.dp
         ) {
@@ -1246,8 +1354,8 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                     onClick = { ScreenshotStorage.delete(context, review.path); returnToCapturedApp() },
                     modifier = Modifier.weight(.84f).height(54.dp),
                     shape = RoundedCornerShape(16.dp),
-                    border = BorderStroke(1.5.dp, Color(0xFFB3261E)),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB3261E))
+                    border = BorderStroke(1.5.dp, UiColor.error),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = UiColor.error)
                 ) { Text("DISCARD", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                 Button(
                     onClick = {
@@ -1258,7 +1366,7 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                     },
                     modifier = Modifier.weight(1f).height(54.dp),
                     shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = Color.White)
+                    colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = UiColor.onPrimary)
                 ) { Text("KEEP + NEXT", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                 Button(
                     onClick = {
@@ -1267,7 +1375,7 @@ private const val PREF_CONNECTOR_COLOR = "connector_color"
                     },
                     modifier = Modifier.weight(1f).height(54.dp),
                     shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF312E81), contentColor = Color.White)
+                    colors = ButtonDefaults.buttonColors(containerColor = UiColor.secondary, contentColor = UiColor.onPrimary)
                 ) { Text("FINISH", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                 }
             }
@@ -1314,8 +1422,12 @@ private fun ReviewCaptureCropOverlay(
     var draggingCorner by remember { mutableStateOf<Int?>(null) }
     val latestCrop by rememberUpdatedState(crop)
     val previewInset = 16.dp
-    // Match the screenshot lightbox: near-black surfaces and high-contrast white controls.
-    val accent = Color.White
+    // The crop overlay sits on a dark screen, so its controls use the normal
+    // surface foreground. `onPrimary` is reserved for the light Apply button.
+    val accent = UiColor.onSurface
+    val cropDim = UiColor.scrim.copy(alpha = .58f)
+    val cropGrid = UiColor.onSurface.copy(alpha = .56f)
+    val cropHandleCenter = UiColor.background
     val overlayInteractionSource = remember { MutableInteractionSource() }
     val haptics = LocalHapticFeedback.current
     var edgeHapticMask by remember { mutableIntStateOf(0) }
@@ -1323,7 +1435,7 @@ private fun ReviewCaptureCropOverlay(
     Box(
             Modifier
                 .fillMaxSize()
-                .background(Color(0xFF171717))
+                .background(UiColor.extra.statusBar)
                 .clickable(interactionSource = overlayInteractionSource, indication = null, onClick = {}),
             contentAlignment = Alignment.Center
         ) {
@@ -1340,18 +1452,18 @@ private fun ReviewCaptureCropOverlay(
             ) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column {
-                        Text("Crop capture", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold)
-                        Text("Drag a corner to choose what to keep", color = Color(0xFFB7B7B7), fontSize = 12.sp)
+                        Text("Crop capture", color = UiColor.onSurface, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                        Text("Drag a corner to choose what to keep", color = UiColor.extra.darkOnSurfaceMuted, fontSize = 12.sp)
                     }
                     IconButton(onClick = onCancel, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Filled.Close, contentDescription = "Close crop editor", tint = Color.White)
+                        Icon(Icons.Filled.Close, contentDescription = "Close crop editor", tint = UiColor.onSurface)
                     }
                 }
                 Box(
                     Modifier.fillMaxWidth().weight(1f)
                         .clip(RoundedCornerShape(20.dp))
-                        .background(Color(0xFF101116))
-                        .border(1.dp, Color(0xFF2B2B2B), RoundedCornerShape(20.dp))
+                        .background(UiColor.extra.darkSurfaceVariant)
+                        .border(1.dp, UiColor.extra.darkOutline, RoundedCornerShape(20.dp))
                 ) {
                     androidx.compose.foundation.Image(
                         bitmap,
@@ -1414,11 +1526,10 @@ private fun ReviewCaptureCropOverlay(
                         val top = rect.top + rect.height * c.top
                         val right = rect.left + rect.width * c.right
                         val bottom = rect.top + rect.height * c.bottom
-                        val dim = Color.Black.copy(alpha = .58f)
-                        drawRect(dim, topLeft = Offset(rect.left, rect.top), size = androidx.compose.ui.geometry.Size(rect.width, top - rect.top))
-                        drawRect(dim, topLeft = Offset(rect.left, bottom), size = androidx.compose.ui.geometry.Size(rect.width, rect.top + rect.height - bottom))
-                        drawRect(dim, topLeft = Offset(rect.left, top), size = androidx.compose.ui.geometry.Size(left - rect.left, bottom - top))
-                        drawRect(dim, topLeft = Offset(right, top), size = androidx.compose.ui.geometry.Size(rect.left + rect.width - right, bottom - top))
+                        drawRect(cropDim, topLeft = Offset(rect.left, rect.top), size = androidx.compose.ui.geometry.Size(rect.width, top - rect.top))
+                        drawRect(cropDim, topLeft = Offset(rect.left, bottom), size = androidx.compose.ui.geometry.Size(rect.width, rect.top + rect.height - bottom))
+                        drawRect(cropDim, topLeft = Offset(rect.left, top), size = androidx.compose.ui.geometry.Size(left - rect.left, bottom - top))
+                        drawRect(cropDim, topLeft = Offset(right, top), size = androidx.compose.ui.geometry.Size(rect.left + rect.width - right, bottom - top))
                         val handleInset = 6.dp.toPx()
                         drawRect(
                             accent.copy(alpha = .95f),
@@ -1428,7 +1539,7 @@ private fun ReviewCaptureCropOverlay(
                         )
                         // Fixed rule-of-thirds guides make it easier to align
                         // the crop with screen edges and visible UI elements.
-                        val gridColor = Color.White.copy(alpha = .56f)
+                        val gridColor = cropGrid
                         val gridStroke = 1.dp.toPx()
                         for (fraction in listOf(1f / 3f, 2f / 3f)) {
                             val x = left + (right - left) * fraction
@@ -1444,7 +1555,7 @@ private fun ReviewCaptureCropOverlay(
                                 point.y.coerceIn(handleInset, size.height - handleInset)
                             )
                             drawCircle(accent, 6.dp.toPx(), handle)
-                            drawCircle(Color(0xFF191919), 2.5.dp.toPx(), handle)
+                            drawCircle(cropHandleCenter, 2.5.dp.toPx(), handle)
                         }
                     }
                 }
@@ -1454,18 +1565,18 @@ private fun ReviewCaptureCropOverlay(
                         enabled = previousCrop != null,
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, Color(0xFF424242)),
+                        border = BorderStroke(1.dp, UiColor.extra.darkOutline),
                         colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = Color.White,
-                            disabledContentColor = Color(0xFF838383),
-                            disabledContainerColor = Color.Transparent
+                            contentColor = UiColor.onSurface,
+                            disabledContentColor = UiColor.onSurfaceVariant.copy(alpha = .72f),
+                            disabledContainerColor = UiColor.transparent
                         )
                     ) { Text("Undo", fontWeight = FontWeight.SemiBold) }
                     Button(
                         onClick = { onSave(crop.valid()) },
                         modifier = Modifier.weight(1.35f),
                         shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color(0xFF171717))
+                        colors = ButtonDefaults.buttonColors(containerColor = UiColor.primary, contentColor = UiColor.onPrimary)
                     ) { Text("Apply crop", fontWeight = FontWeight.Bold) }
                 }
             }
@@ -1487,7 +1598,7 @@ private fun ReviewCaptureCropOverlay(
     // Room emits the supplied null initial value before its first query result.
     // Navigating Home from that transient state made recent-diagram taps flash.
     if (currentFlow == null) {
-        Box(Modifier.fillMaxSize().background(Color(0xFFF1F1F1)))
+        Box(Modifier.fillMaxSize().background(UiColor.background))
         return
     }
     val flow = currentFlow!!
@@ -1710,7 +1821,7 @@ private fun ReviewCaptureCropOverlay(
                 )
             }
         }
-        if (screens.isEmpty()) Text("Create a diagram with the + option below", Modifier.align(Alignment.Center), color = Color(0xFF4F46E5), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        if (screens.isEmpty()) Text("Create a diagram with the + option below", Modifier.align(Alignment.Center), color = UiColor.primary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         else {
             DiagramPreview(
                 screens = screens,
@@ -1815,23 +1926,23 @@ private fun ReviewCaptureCropOverlay(
     if (showDeleteConfirmation) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirmation = false },
-            containerColor = Color.White,
+            containerColor = UiColor.surface,
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("⚠", color = Color(0xFFE8D372), fontSize = 32.sp)
+                    Text("⚠", color = UiColor.extra.warning, fontSize = 32.sp)
                     Spacer(Modifier.width(12.dp))
-                    Text("Deleting diagram", color = Color(0xFF263F7D), fontWeight = FontWeight.Medium)
+                    Text("Deleting diagram", color = UiColor.secondary, fontWeight = FontWeight.Medium)
                 }
             },
             text = {
                 Text(
                     "Your diagram will be permanently deleted. Are you sure you want to do this?",
-                    color = Color(0xFF222222), fontSize = 17.sp
+                    color = UiColor.onSurface, fontSize = 17.sp
                 )
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirmation = false }) {
-                    Text("CANCEL", color = Color(0xFF263F7D))
+                    Text("CANCEL", color = UiColor.secondary)
                 }
             },
             confirmButton = {
@@ -1840,7 +1951,7 @@ private fun ReviewCaptureCropOverlay(
                         showDeleteConfirmation = false
                         goBack()
                     }
-                }) { Text("OK", color = Color(0xFF263F7D)) }
+                }) { Text("OK", color = UiColor.secondary) }
             }
         )
     }
@@ -1848,34 +1959,34 @@ private fun ReviewCaptureCropOverlay(
 }
 
 @Composable private fun CaptureTipDialog(onConfirm: (Boolean) -> Unit) {
-    val primaryBlue = Color(0xFF4F46E5)
+    val primaryBlue = UiColor.primary
     var dontShowAgain by remember { mutableStateOf(false) }
     Dialog(onDismissRequest = { }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(
             modifier = Modifier.fillMaxWidth(.88f),
-            color = Color.White,
+            color = UiColor.surface,
             shape = RoundedCornerShape(28.dp),
-            border = BorderStroke(1.dp, Color(0xFFE5E7F0)),
+            border = BorderStroke(1.dp, UiColor.outlineVariant),
             shadowElevation = 16.dp
         ) {
             Column(Modifier.padding(22.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
-                        Modifier.size(46.dp).background(Color(0xFFEDEBFF), CircleShape),
+                        Modifier.size(46.dp).background(UiColor.primaryContainer, CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(Icons.Default.PhoneAndroid, contentDescription = null, tint = primaryBlue, modifier = Modifier.size(25.dp))
                     }
                     Spacer(Modifier.width(14.dp))
                     Column {
-                        Text("Ready to capture?", color = Color(0xFF1F2D43), fontSize = 21.sp, fontWeight = FontWeight.Bold)
-                        Text("A quick guide to the capture bubble", color = Color(0xFF718096), fontSize = 13.sp)
+                        Text("Ready to capture?", color = UiColor.onSurface, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                        Text("A quick guide to the capture bubble", color = UiColor.onSurfaceVariant, fontSize = 13.sp)
                     }
                 }
                 Spacer(Modifier.height(20.dp))
                 Text(
                     "FlowSnap will show a floating bubble above the app you are documenting.",
-                    color = Color(0xFF4B5B72),
+                    color = UiColor.onSurfaceVariant,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
                 )
@@ -1890,17 +2001,17 @@ private fun ReviewCaptureCropOverlay(
                         checked = dontShowAgain,
                         onCheckedChange = { dontShowAgain = it },
                         modifier = Modifier.size(24.dp),
-                        colors = CheckboxDefaults.colors(checkedColor = primaryBlue, uncheckedColor = Color(0xFF7C8798), checkmarkColor = Color.White)
+                        colors = CheckboxDefaults.colors(checkedColor = primaryBlue, uncheckedColor = UiColor.onSurfaceVariant, checkmarkColor = UiColor.onPrimary)
                     )
                     Spacer(Modifier.width(10.dp))
-                    Text("Don't show this guide again", color = Color(0xFF334155), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    Text("Don't show this guide again", color = UiColor.onSurface, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 }
                 Spacer(Modifier.height(18.dp))
                 Button(
                     onClick = { onConfirm(dontShowAgain) },
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = Color.White)
+                    colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = UiColor.onPrimary)
                 ) { Text("GOT IT", fontWeight = FontWeight.Bold, letterSpacing = .6.sp) }
             }
         }
@@ -1909,13 +2020,13 @@ private fun ReviewCaptureCropOverlay(
 
 @Composable
 private fun ShareToDriveGuideDialog(onDismiss: () -> Unit, onContinue: () -> Unit) {
-    val primaryBlue = Color(0xFF4F46E5)
+    val primaryBlue = UiColor.primary
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(
             modifier = Modifier.fillMaxWidth(.88f),
-            color = Color.White,
+            color = UiColor.surface,
             shape = RoundedCornerShape(28.dp),
-            border = BorderStroke(1.dp, Color(0xFFE2E8F2)),
+            border = BorderStroke(1.dp, UiColor.outlineVariant),
             shadowElevation = 18.dp
         ) {
             Column(Modifier.padding(26.dp)) {
@@ -1923,7 +2034,7 @@ private fun ShareToDriveGuideDialog(onDismiss: () -> Unit, onContinue: () -> Uni
                     Surface(
                         modifier = Modifier.size(54.dp),
                         shape = RoundedCornerShape(16.dp),
-                        color = Color(0xFFF1F6FF)
+                        color = UiColor.primaryContainer
                     ) {
                         Icon(
                             painterResource(R.drawable.ic_google_drive),
@@ -1934,7 +2045,7 @@ private fun ShareToDriveGuideDialog(onDismiss: () -> Unit, onContinue: () -> Uni
                     }
                     Spacer(Modifier.width(15.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("Save to Google Drive", color = Color(0xFF1F2D43), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                        Text("Save to Google Drive", color = UiColor.onSurface, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.height(2.dp))
                         Text("PDF + SVG export", color = primaryBlue, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     }
@@ -1943,7 +2054,7 @@ private fun ShareToDriveGuideDialog(onDismiss: () -> Unit, onContinue: () -> Uni
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
-                    color = Color(0xFFF7F9FC)
+                    color = UiColor.surfaceVariant
                 ) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
                         DriveGuideStep("1", "FlowSnap creates your PDF and SVG")
@@ -1956,13 +2067,13 @@ private fun ShareToDriveGuideDialog(onDismiss: () -> Unit, onContinue: () -> Uni
                     onClick = onContinue,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = Color.White),
+                    colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = UiColor.onPrimary),
                     contentPadding = PaddingValues(vertical = 14.dp)
                 ) {
                     Text("CONTINUE TO SHARE", fontWeight = FontWeight.Bold)
                 }
                 TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.CenterHorizontally)) {
-                    Text("NOT NOW", color = Color(0xFF64748B), fontWeight = FontWeight.SemiBold)
+                    Text("NOT NOW", color = UiColor.onSurfaceVariant, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -1972,13 +2083,13 @@ private fun ShareToDriveGuideDialog(onDismiss: () -> Unit, onContinue: () -> Uni
 @Composable
 private fun DriveGuideStep(number: String, text: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Surface(modifier = Modifier.size(25.dp), shape = CircleShape, color = Color(0xFF4F46E5)) {
+        Surface(modifier = Modifier.size(25.dp), shape = CircleShape, color = UiColor.primary) {
             Box(contentAlignment = Alignment.Center) {
-                Text(number, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text(number, color = UiColor.onPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
         }
         Spacer(Modifier.width(12.dp))
-        Text(text, color = Color(0xFF324055), fontSize = 14.sp, lineHeight = 19.sp)
+        Text(text, color = UiColor.onSurface, fontSize = 14.sp, lineHeight = 19.sp)
     }
 }
 
@@ -1993,7 +2104,7 @@ private data class ExportProgressDetails(
 
 @Composable
 private fun ExportProgressDialog(kind: ExportProgressKind) {
-    val primaryBlue = Color(0xFF4F46E5)
+    val primaryBlue = UiColor.primary
     val details = when (kind) {
         ExportProgressKind.JPEG -> ExportProgressDetails(
             iconRes = R.drawable.ic_flow_save,
@@ -2042,16 +2153,16 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
     ) {
         Surface(
             modifier = Modifier.fillMaxWidth(.88f),
-            color = Color.White,
+            color = UiColor.surface,
             shape = RoundedCornerShape(28.dp),
-            border = BorderStroke(1.dp, Color(0xFFE2E8F2)),
+            border = BorderStroke(1.dp, UiColor.outlineVariant),
             shadowElevation = 18.dp
         ) {
             Column(Modifier.padding(26.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Surface(
                     modifier = Modifier.size(60.dp),
                     shape = CircleShape,
-                    color = Color(0xFFF1F6FF)
+                    color = UiColor.primaryContainer
                 ) {
                     if (details.usePdfIcon) {
                         Icon(
@@ -2070,11 +2181,11 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
                     }
                 }
                 Spacer(Modifier.height(16.dp))
-                Text(details.title, color = Color(0xFF1F2D43), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text(details.title, color = UiColor.onSurface, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(7.dp))
                 Text(
                     details.description,
-                    color = Color(0xFF66758A),
+                    color = UiColor.onSurfaceVariant,
                     fontSize = 14.sp,
                     lineHeight = 20.sp,
                     textAlign = TextAlign.Center
@@ -2085,12 +2196,12 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(14.dp),
-                    color = Color(0xFFF7F9FC)
+                    color = UiColor.surfaceVariant
                 ) {
                     Text(
                         details.destination,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
-                        color = Color(0xFF4F5D70),
+                        color = UiColor.onSurfaceVariant,
                         fontSize = 13.sp,
                         textAlign = TextAlign.Center
                     )
@@ -2109,7 +2220,7 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
     onExportSketch: () -> Unit,
     onUnavailable: (String) -> Unit
 ) {
-    val primaryBlue = Color(0xFF4F46E5)
+    val primaryBlue = UiColor.primary
     var selected by remember { mutableStateOf("JPEG") }
     val formats = listOf(
         "JPEG" to "High-quality image for sharing and viewing.",
@@ -2120,15 +2231,15 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(
             modifier = Modifier.fillMaxWidth(.88f),
-            color = Color.White,
+            color = UiColor.surface,
             shape = RoundedCornerShape(28.dp),
-            border = BorderStroke(1.dp, Color(0xFFE2E8F2)),
+            border = BorderStroke(1.dp, UiColor.outlineVariant),
             shadowElevation = 14.dp
         ) {
             Column(Modifier.padding(horizontal = 24.dp, vertical = 26.dp)) {
                 Text(
                     "EXPORT DIAGRAM",
-                    color = Color(0xFF1F2D43),
+                    color = UiColor.onSurface,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.8.sp
@@ -2136,7 +2247,7 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
                 Spacer(Modifier.height(8.dp))
                 Text(
                     "Choose a format for your flow",
-                    color = Color(0xFF6A778C),
+                    color = UiColor.onSurfaceVariant,
                     fontSize = 13.sp
                 )
                 Spacer(Modifier.height(18.dp))
@@ -2146,7 +2257,7 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
                     Row(
                         modifier = Modifier.fillMaxWidth()
                             .clip(rowShape)
-                            .background(if (isSelected) Color(0x0D24519B) else Color.Transparent)
+                            .background(if (isSelected) UiColor.primary.copy(alpha = .05f) else UiColor.transparent)
                             .clickable { selected = format }
                             .padding(horizontal = 12.dp, vertical = 13.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -2154,12 +2265,12 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
                         ExportFormatRadio(selected = isSelected, primaryBlue = primaryBlue)
                         Spacer(Modifier.width(14.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(format, color = Color(0xFF202B3B), fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                            Text(format, color = UiColor.onSurface, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                             if (isSelected) {
                                 Spacer(Modifier.height(3.dp))
                                 Text(
                                     description,
-                                    color = Color(0xFF708096),
+                                    color = UiColor.onSurfaceVariant,
                                     fontSize = 11.sp,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
@@ -2181,7 +2292,7 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
                             else -> onUnavailable(selected)
                         }
                     },
-                        colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = Color.White),
+                        colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = UiColor.onPrimary),
                         shape = RoundedCornerShape(14.dp),
                         contentPadding = PaddingValues(horizontal = 22.dp, vertical = 12.dp)
                     ) { Text("SAVE AS", fontWeight = FontWeight.Bold) }
@@ -2195,8 +2306,8 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
 private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     Box(
         modifier = Modifier.size(28.dp)
-            .background(if (selected) Color(0x1A24519B) else Color.Transparent, CircleShape)
-            .border(2.dp, if (selected) primaryBlue else Color(0xFF7A8493), CircleShape),
+            .background(if (selected) UiColor.primary.copy(alpha = .10f) else UiColor.transparent, CircleShape)
+            .border(2.dp, if (selected) primaryBlue else UiColor.outline, CircleShape),
         contentAlignment = Alignment.Center
     ) {
         if (selected) Box(Modifier.size(12.dp).background(primaryBlue, CircleShape))
@@ -2236,28 +2347,28 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     var preferredColumns by remember(flow.id) { mutableIntStateOf(flow.preferredColumns.coerceIn(1, 9)) }
     var appearancePage by remember(flow.id) { mutableStateOf(false) }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        // Keep the canvas visible without the heavy, muddy system dim overlay.
+        // Dim the editor beneath the modal so the settings panel is the clear focus.
         val dialogView = LocalView.current
         SideEffect {
-            (dialogView.parent as? DialogWindowProvider)?.window?.setDimAmount(0.12f)
+            (dialogView.parent as? DialogWindowProvider)?.window?.setDimAmount(0.60f)
         }
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Surface(
             // Wrap content naturally so the actions follow the swatches instead
             // of being pushed to the bottom of a near-full-screen dialog.
             modifier = Modifier.fillMaxWidth(.90f).offset(y = (-36).dp),
-            color = Color.White,
+            color = UiColor.surface,
             shape = RoundedCornerShape(20.dp),
-            border = BorderStroke(1.dp, Color(0xFFE3E7EF)),
+            border = BorderStroke(1.dp, UiColor.outlineVariant),
             shadowElevation = 12.dp
         ) {
             Column(Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
-                Text("DIAGRAM SETTINGS", color = Color(0xFF1F2D43), fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                Text("DIAGRAM SETTINGS", color = UiColor.onSurface, fontSize = 21.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
-                Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFE3E7EF)))
+                Box(Modifier.fillMaxWidth().height(1.dp).background(UiColor.outlineVariant))
                 Spacer(Modifier.height(10.dp))
                 Row(
-                    Modifier.fillMaxWidth().background(Color(0xFFF1F3F8), RoundedCornerShape(12.dp)).padding(3.dp),
+                    Modifier.fillMaxWidth().background(UiColor.surfaceVariant, RoundedCornerShape(12.dp)).padding(3.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     DiagramSettingsTab("LABELS", selected = !appearancePage, onClick = { appearancePage = false }, modifier = Modifier.weight(1f))
@@ -2308,10 +2419,10 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
                 Spacer(Modifier.height(20.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = onDismiss, modifier = Modifier.padding(end = 14.dp)) {
-                        Text("CANCEL", color = Color(0xFF5E6F8E), fontWeight = FontWeight.SemiBold)
+                        Text("CANCEL", color = UiColor.onSurfaceVariant, fontWeight = FontWeight.SemiBold)
                     }
                     TextButton(onClick = { onSave(title, version, createdBy, showTitle, showVersion, showCreatedAt, showCreatedBy, showAppVersion, showMobileStencils, connectorColor, preferredColumns) }) {
-                        Text("SAVE", color = Color(0xFF4F46E5), fontWeight = FontWeight.Bold)
+                        Text("SAVE", color = UiColor.primary, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -2323,11 +2434,11 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 @Composable private fun DiagramSettingsTab(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Box(
         modifier.height(34.dp).clip(RoundedCornerShape(9.dp))
-            .background(if (selected) Color.White else Color.Transparent)
+            .background(if (selected) UiColor.surface else UiColor.transparent)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Text(label, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (selected) Color(0xFF4F46E5) else Color(0xFF64748B))
+        Text(label, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (selected) UiColor.primary else UiColor.onSurfaceVariant)
     }
 }
 
@@ -2341,8 +2452,8 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 ) {
     Column(
         Modifier.fillMaxWidth()
-            .background(Color(0xFFF8FAFC), RoundedCornerShape(14.dp))
-            .border(1.dp, Color(0xFFE3E7EF), RoundedCornerShape(14.dp))
+            .background(UiColor.surfaceVariant, RoundedCornerShape(14.dp))
+            .border(1.dp, UiColor.outlineVariant, RoundedCornerShape(14.dp))
             .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
         AppearanceToggle(showMobileStencils, onShowMobileStencilsChange)
@@ -2356,7 +2467,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 @Composable private fun LookAndFeelDivider() {
     Box(
         Modifier.fillMaxWidth().padding(vertical = 9.dp)
-            .height(1.dp).background(Color(0xFFE3E7EF))
+            .height(1.dp).background(UiColor.outlineVariant)
     )
 }
 
@@ -2367,25 +2478,25 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     ) {
         Box(
             Modifier.size(36.dp)
-                .background(Color(0xFFF1F3FF), RoundedCornerShape(10.dp))
-                .border(1.5.dp, Color(0xFF4F46E5), RoundedCornerShape(10.dp)),
+                .background(UiColor.surface, RoundedCornerShape(10.dp))
+                .border(1.dp, UiColor.outlineVariant, RoundedCornerShape(10.dp)),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = Icons.Default.Apps,
                 contentDescription = "Diagram columns",
-                tint = Color(0xFF4F46E5),
+                tint = UiColor.onSurface,
                 modifier = Modifier.size(21.dp)
             )
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
-            Text("Number of columns", color = Color(0xFF202B3B), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("Number of columns", color = UiColor.onSurface, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         }
         Spacer(Modifier.width(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             DiagramColumnStepButton("−", enabled = columns > 1) { onColumnsChange(columns - 1) }
-            Text(columns.toString(), modifier = Modifier.width(26.dp), textAlign = TextAlign.Center, color = Color(0xFF202B3B), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text(columns.toString(), modifier = Modifier.width(26.dp), textAlign = TextAlign.Center, color = UiColor.onSurface, fontSize = 16.sp, fontWeight = FontWeight.Bold)
             DiagramColumnStepButton("+", enabled = columns < 9) { onColumnsChange(columns + 1) }
         }
     }
@@ -2393,27 +2504,27 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 
 @Composable private fun DiagramColumnStepButton(label: String, enabled: Boolean, onClick: () -> Unit) {
     Box(
-        Modifier.size(30.dp).background(if (enabled) Color(0xFFF5F6FF) else Color.Transparent, CircleShape)
-            .border(1.5.dp, if (enabled) Color(0xFF4F46E5) else Color(0xFFBFC8D8), CircleShape)
+        Modifier.size(30.dp).background(if (enabled) UiColor.surfaceVariant else UiColor.transparent, CircleShape)
+            .border(1.dp, UiColor.outlineVariant, CircleShape)
             .clip(CircleShape).clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Text(label, color = if (enabled) Color(0xFF4F46E5) else Color(0xFFBFC8D8), fontSize = 20.sp, lineHeight = 20.sp)
+        Text(label, color = if (enabled) UiColor.onSurface else UiColor.onSurfaceVariant, fontSize = 20.sp, lineHeight = 20.sp)
     }
 }
 
 @Composable private fun EditableDiagramSetting(label: String, value: String, onValueChange: (String) -> Unit, included: Boolean, toggleIncluded: () -> Unit) {
     Column(Modifier.fillMaxWidth()) {
-        Text(label, fontSize = 12.sp, color = Color(0xFF53627A), fontWeight = FontWeight.Medium)
+        Text(label, fontSize = 12.sp, color = UiColor.onSurfaceVariant, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(3.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.weight(1f).height(44.dp)
-                    .border(1.dp, Color(0xFFD2D8E2), RoundedCornerShape(10.dp))
+                    .border(1.dp, UiColor.outlineVariant, RoundedCornerShape(10.dp))
                     .padding(horizontal = 16.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
-                val primaryBlue = Color(0xFF4F46E5)
+                val primaryBlue = UiColor.primary
                 CompositionLocalProvider(
                     LocalTextSelectionColors provides TextSelectionColors(
                         handleColor = primaryBlue,
@@ -2428,7 +2539,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
                         cursorBrush = SolidColor(primaryBlue),
                         textStyle = androidx.compose.ui.text.TextStyle(
                             fontSize = 15.sp,
-                        color = Color(0xFF202B3B)
+                        color = UiColor.onSurface
                         )
                     )
                 }
@@ -2442,16 +2553,16 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 
 @Composable private fun ReadOnlyDiagramSetting(label: String, value: String, included: Boolean, toggleIncluded: () -> Unit) {
     Column(Modifier.fillMaxWidth()) {
-        Text(label, fontSize = 12.sp, color = Color(0xFF53627A), fontWeight = FontWeight.Medium)
+        Text(label, fontSize = 12.sp, color = UiColor.onSurfaceVariant, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(3.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.weight(1f).height(44.dp)
-                    .border(1.dp, Color(0xFFD2D8E2), RoundedCornerShape(10.dp))
+                    .border(1.dp, UiColor.outlineVariant, RoundedCornerShape(10.dp))
                     .padding(horizontal = 16.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
-                Text(value, fontSize = 15.sp, color = Color(0xFF202B3B), maxLines = 1)
+                Text(value, fontSize = 15.sp, color = UiColor.onSurface, maxLines = 1)
             }
             Spacer(Modifier.width(10.dp))
             IncludedMark(included, toggleIncluded)
@@ -2465,20 +2576,20 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(
             Modifier.size(36.dp)
-                .background(Color(0xFFF1F3FF), RoundedCornerShape(10.dp))
-                .border(1.5.dp, Color(0xFF4F46E5), RoundedCornerShape(10.dp)),
+                .background(UiColor.surface, RoundedCornerShape(10.dp))
+                .border(1.dp, UiColor.outlineVariant, RoundedCornerShape(10.dp)),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = Icons.Default.PhoneAndroid,
                 contentDescription = "Mobile stencil",
-                tint = Color(0xFF4F46E5),
+                tint = UiColor.onSurface,
                 modifier = Modifier.size(21.dp)
             )
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
-            Text("Show mobile stencils", color = Color(0xFF202B3B), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("Show mobile stencils", color = UiColor.onSurface, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         }
         IncludedMark(checked) { onCheckedChange(!checked) }
     }
@@ -2487,25 +2598,25 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 /** A compact preset picker keeps connector colors readable and consistent. */
 @Composable private fun ConnectorColorSetting(selectedColor: Long, onColorSelected: (Long) -> Unit) {
     val colors = listOf(
-        0xFF69B83AL to "Green",
-        0xFF4F46E5L to "Indigo",
-        0xFFE05252L to "Red",
-        0xFF4D4D4DL to "Charcoal",
-        0xFFF39C12L to "Orange",
-        0xFF8E44ADL to "Purple",
-        0xFF00A6A6L to "Teal",
-        0xFFE91E63L to "Pink"
+        ConnectorPalette.Green to "Green",
+        ConnectorPalette.Indigo to "Indigo",
+        ConnectorPalette.Red to "Red",
+        ConnectorPalette.Charcoal to "Charcoal",
+        ConnectorPalette.Orange to "Orange",
+        ConnectorPalette.Purple to "Purple",
+        ConnectorPalette.Teal to "Teal",
+        ConnectorPalette.Pink to "Pink"
     )
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.height(40.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.size(36.dp).background(Color(selectedColor.toInt()), RoundedCornerShape(10.dp))
-                    .border(1.dp, Color(0x22000000), RoundedCornerShape(10.dp))
+                    .border(1.dp, UiColor.onSurface.copy(alpha = .13f), RoundedCornerShape(10.dp))
             )
             Spacer(Modifier.width(10.dp))
             Column {
-                Text("Color of arrows", color = Color(0xFF202B3B), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                Text("#%06X".format(selectedColor and 0xFFFFFF), color = Color(0xFF63728A), fontSize = 11.sp)
+                Text("Color of arrows", color = UiColor.onSurface, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text("#%06X".format(selectedColor and 0xFFFFFF), color = UiColor.onSurfaceVariant, fontSize = 11.sp)
             }
         }
         Spacer(Modifier.height(10.dp))
@@ -2517,11 +2628,11 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
                 Box(
                     Modifier.size(27.dp)
                         .background(Color(color.toInt()), CircleShape)
-                        .border(if (selected) 2.5.dp else 1.dp, if (selected) Color(0xFF1F2D43) else Color(0xFFD2D8E2), CircleShape)
+                        .border(if (selected) 2.5.dp else 1.dp, if (selected) UiColor.onSurface else UiColor.outline, CircleShape)
                         .clickable { onColorSelected(color) },
                     contentAlignment = Alignment.Center
                 ) {
-                    if (selected) Text("✓", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    if (selected) Text("✓", color = UiColor.onPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -2532,19 +2643,15 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     val interactionSource = remember { MutableInteractionSource() }
     val hovered by interactionSource.collectIsHoveredAsState()
     val borderColor by animateColorAsState(
-        targetValue = when {
-            included -> Color(0xFF4F46E5)
-            hovered -> Color(0xFF6366F1)
-            else -> Color(0xFFA5B4FC)
-        },
+        targetValue = if (hovered) UiColor.onSurfaceVariant else UiColor.outlineVariant,
         animationSpec = tween(durationMillis = 150),
         label = "checkboxBorder"
     )
     val backgroundColor by animateColorAsState(
         targetValue = when {
-            included -> Color(0xFFEEF2FF)
-            hovered -> Color(0x144F46E5)
-            else -> Color.White
+            included -> UiColor.surfaceVariant
+            hovered -> UiColor.surfaceVariant
+            else -> UiColor.surface
         },
         animationSpec = tween(durationMillis = 150),
         label = "checkboxBackground"
@@ -2557,14 +2664,14 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
             // The default indication draws the chunky gray block seen in the old UI.
             .clickable(interactionSource = interactionSource, indication = null, enabled = onClick != null) { onClick?.invoke() },
         contentAlignment = Alignment.Center
-    ) { if (included) Text("✓", color = Color(0xFF4F46E5), fontSize = 20.sp, fontWeight = FontWeight.Bold) }
+    ) { if (included) Text("✓", color = UiColor.onSurface, fontSize = 20.sp, fontWeight = FontWeight.Bold) }
 }
 
 @Composable private fun DragTapIllustration(primaryBlue: Color) = Surface(
     modifier = Modifier.fillMaxWidth(),
-    color = Color(0xFFF7F7FF),
+    color = UiColor.secondaryContainer,
     shape = RoundedCornerShape(18.dp),
-    border = BorderStroke(1.dp, Color(0xFFE3E2FF))
+    border = BorderStroke(1.dp, UiColor.outlineVariant)
 ) {
     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         CaptureTipStep(
@@ -2591,35 +2698,38 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 @Composable private fun CaptureTipStep(number: String, title: String, detail: String, primaryBlue: Color) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(28.dp).background(primaryBlue, CircleShape), contentAlignment = Alignment.Center) {
-            Text(number, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Text(number, color = UiColor.onPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(title, color = Color(0xFF26334A), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text(detail, color = Color(0xFF718096), fontSize = 12.sp, lineHeight = 16.sp)
+            Text(title, color = UiColor.onSurface, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(detail, color = UiColor.onSurfaceVariant, fontSize = 12.sp, lineHeight = 16.sp)
         }
     }
 }
 
-private fun Modifier.diagramGrid() = this.drawBehind {
+@Composable private fun Modifier.diagramGrid(): Modifier {
+    val surfaceVariant = UiColor.surfaceVariant
+    val canvasBackground = UiColor.extra.canvasBackground
+    val minorGrid = UiColor.extra.canvasMinorGrid.copy(alpha = .72f)
+    val majorGrid = UiColor.extra.canvasMajorGrid.copy(alpha = .70f)
+    return this.drawBehind {
     // Fine graph-paper grid: it gives the editor structure without competing
     // with the screenshots. Every fourth line is a gentle visual guide.
     drawRect(
         Brush.linearGradient(
-            colors = listOf(Color(0xFFF8FAFE), Color(0xFFF1F4FA)),
+            colors = listOf(surfaceVariant, canvasBackground),
             start = Offset.Zero,
             end = Offset(size.width, size.height)
         )
     )
     val spacing = 54f
-    val minor = Color(0xFFDCE3EF).copy(alpha = .72f)
-    val major = Color(0xFFC5D0E2).copy(alpha = .70f)
     var x = 0f
     var column = 0
     while (x <= size.width) {
         val isMajor = column % 4 == 0
         drawLine(
-            color = if (isMajor) major else minor,
+            color = if (isMajor) majorGrid else minorGrid,
             start = Offset(x, 0f),
             end = Offset(x, size.height),
             strokeWidth = if (isMajor) 1.5f else 0.8f
@@ -2632,13 +2742,14 @@ private fun Modifier.diagramGrid() = this.drawBehind {
     while (y <= size.height) {
         val isMajor = row % 4 == 0
         drawLine(
-            color = if (isMajor) major else minor,
+            color = if (isMajor) majorGrid else minorGrid,
             start = Offset(0f, y),
             end = Offset(size.width, y),
             strokeWidth = if (isMajor) 1.5f else 0.8f
         )
         y += spacing
         row++
+    }
     }
 }
 
@@ -3712,20 +3823,22 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
 
 @Composable private fun EditorCircle(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, large: Boolean = false, enabled: Boolean = true) {
     val size = if (large) 74.dp else 48.dp
-    val tint = if (enabled) Color(0xFF4F46E5) else Color(0xFFB8B8B8)
-    Surface(modifier = modifier.size(size), shape = CircleShape, color = Color.Transparent, border = BorderStroke(if (large) 3.dp else 2.dp, tint)) { Box(Modifier.fillMaxSize().clip(CircleShape).clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) { Icon(icon, label, tint = tint, modifier = Modifier.size(if (large) 42.dp else 27.dp)) } }
+    val borderTint = if (enabled) UiColor.extra.editorControl else UiColor.extra.disabled
+    val iconTint = if (enabled) UiColor.extra.editorIcon else UiColor.extra.disabled
+    Surface(modifier = modifier.size(size), shape = CircleShape, color = UiColor.transparent, border = BorderStroke(if (large) 3.dp else 2.dp, borderTint)) { Box(Modifier.fillMaxSize().clip(CircleShape).clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) { Icon(icon, label, tint = iconTint, modifier = Modifier.size(if (large) 42.dp else 27.dp)) } }
 }
 
 /** Renders the supplied Android Studio vector assets in the existing editor control style. */
 @Composable private fun EditorDrawableCircle(iconRes: Int, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, large: Boolean = false, enabled: Boolean = true, iconTint: Color? = null) {
     val size = if (large) 74.dp else 48.dp
-    val tint = if (enabled) Color(0xFF4F46E5) else Color(0xFFB8B8B8)
-    Surface(modifier = modifier.size(size), shape = CircleShape, color = Color.Transparent, border = BorderStroke(if (large) 3.dp else 2.dp, tint)) {
+    val borderTint = if (enabled) UiColor.extra.editorControl else UiColor.extra.disabled
+    val defaultIconTint = if (enabled) UiColor.extra.editorIcon else UiColor.extra.disabled
+    Surface(modifier = modifier.size(size), shape = CircleShape, color = UiColor.transparent, border = BorderStroke(if (large) 3.dp else 2.dp, borderTint)) {
         Box(Modifier.fillMaxSize().clip(CircleShape).clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) {
             Icon(
                 painterResource(iconRes),
                 label,
-                tint = if (enabled) iconTint ?: tint else tint,
+                tint = if (enabled) iconTint ?: defaultIconTint else defaultIconTint,
                 modifier = Modifier.size(if (large) 42.dp else 27.dp)
             )
         }
@@ -3755,7 +3868,7 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
     Column(modifier) {
     Card(
         modifier = Modifier.fillMaxWidth().weight(1f),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = UiColor.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
         Column(Modifier.padding(12.dp).fillMaxSize()) {
@@ -3800,10 +3913,16 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
             }
             if (!canvasMode && metadata.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
-                Row(Modifier.fillMaxWidth().background(Color(0xFFF8F8F8)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                Row(
+                    Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(UiColor.surfaceVariant)
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
                     metadata.forEach { (label, value) ->
                         Column(Modifier.weight(1f, fill = false)) {
-                            Text(label, fontSize = 9.sp, color = Color.Gray)
+                            Text(label, fontSize = 9.sp, color = UiColor.onSurfaceVariant)
                             Text(value, fontSize = 12.sp, maxLines = 1)
                         }
                     }
@@ -3872,6 +3991,7 @@ private fun fittedScreenshotRectInPadding(
     )
 }
 
+@Suppress("DEPRECATION") // Fallback colors for devices with opaque system-bar regions.
 @Composable private fun ScreenshotLightbox(
     screen: ScreenEntity,
     screenPosition: Int,
@@ -3884,20 +4004,25 @@ private fun fittedScreenshotRectInPadding(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val hostActivity = LocalActivity.current
-    // The viewer owns a dark visual layer, including its system bars, until it
-    // is dismissed. The host's regular light appearance is restored afterward.
-    androidx.compose.runtime.DisposableEffect(hostActivity) {
-        val hostWindow = hostActivity?.window
-        val controller = hostWindow?.let { WindowCompat.getInsetsController(it, it.decorView) }
-            ?: return@DisposableEffect onDispose { }
+    val viewerBarColor = UiColor.background
+    val lightViewerTheme = viewerBarColor.luminance() > .5f
+    // Keep the actual system-bar surface in sync with the lightbox backdrop.
+    // This matters on devices that reserve an opaque status-bar region rather
+    // than allowing the dialog to draw behind it.
+    androidx.compose.runtime.DisposableEffect(hostActivity, viewerBarColor) {
+        val hostWindow = hostActivity?.window ?: return@DisposableEffect onDispose { }
+        val controller = WindowCompat.getInsetsController(hostWindow, hostWindow.decorView)
         val previousLightStatusIcons = controller.isAppearanceLightStatusBars
         val previousLightNavigationIcons = controller.isAppearanceLightNavigationBars
-        // Android 15 draws system bars edge-to-edge. The lightbox owns the
-        // visible dark system-bar backdrop in Compose, so no deprecated
-        // Window status/navigation-bar color mutation is necessary.
-        controller.isAppearanceLightStatusBars = false
-        controller.isAppearanceLightNavigationBars = false
+        val previousStatusBarColor = hostWindow.statusBarColor
+        val previousNavigationBarColor = hostWindow.navigationBarColor
+        hostWindow.statusBarColor = viewerBarColor.toArgb()
+        hostWindow.navigationBarColor = viewerBarColor.toArgb()
+        controller.isAppearanceLightStatusBars = lightViewerTheme
+        controller.isAppearanceLightNavigationBars = lightViewerTheme
         onDispose {
+            hostWindow.statusBarColor = previousStatusBarColor
+            hostWindow.navigationBarColor = previousNavigationBarColor
             controller.isAppearanceLightStatusBars = previousLightStatusIcons
             controller.isAppearanceLightNavigationBars = previousLightNavigationIcons
         }
@@ -3910,6 +4035,11 @@ private fun fittedScreenshotRectInPadding(
     var showDeleteConfirmation by remember { mutableStateOf(false) }
     var editingPointer by remember(screen.id) { mutableStateOf(false) }
     var pointerPosition by remember(screen.id) { mutableStateOf(Offset(screen.markerX, screen.markerY)) }
+    val pointerGuide = UiColor.onPrimary.copy(alpha = .45f)
+    val pointerShadow = UiColor.inverseSurface.copy(alpha = .38f)
+    val pointerRing = UiColor.onPrimary.copy(alpha = .9f)
+    val pointerAccent = UiColor.primary
+    val pointerCenter = UiColor.onPrimary
     val backdropAlpha by animateFloatAsState(
         targetValue = if (visible) 1f else 0f,
         animationSpec = tween(180),
@@ -3955,8 +4085,10 @@ private fun fittedScreenshotRectInPadding(
                 window?.isNavigationBarContrastEnforced = false
             }
             window?.let {
-                WindowCompat.getInsetsController(it, dialogView).isAppearanceLightStatusBars = false
-                WindowCompat.getInsetsController(it, dialogView).isAppearanceLightNavigationBars = false
+                it.statusBarColor = viewerBarColor.toArgb()
+                it.navigationBarColor = viewerBarColor.toArgb()
+                WindowCompat.getInsetsController(it, dialogView).isAppearanceLightStatusBars = lightViewerTheme
+                WindowCompat.getInsetsController(it, dialogView).isAppearanceLightNavigationBars = lightViewerTheme
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 window?.setBackgroundBlurRadius(24)
@@ -3966,7 +4098,7 @@ private fun fittedScreenshotRectInPadding(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer(alpha = backdropAlpha)
-                .background(Color(0xCC05070B))
+                .background(UiColor.background.copy(alpha = .96f))
                 .clickable(interactionSource = backdropInteractionSource, indication = null, onClick = requestClose),
             contentAlignment = Alignment.Center
         ) {
@@ -3976,7 +4108,7 @@ private fun fittedScreenshotRectInPadding(
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .windowInsetsTopHeight(WindowInsets.statusBars)
-                    .background(Color(0xFF1A1A1A))
+                    .background(UiColor.background)
             )
             Surface(
                 modifier = Modifier
@@ -3986,9 +4118,9 @@ private fun fittedScreenshotRectInPadding(
                     .offset(y = (-63).dp)
                     .graphicsLayer(scaleX = imageScale, scaleY = imageScale)
                     .clickable(interactionSource = consumeTapInteractionSource, indication = null, onClick = {}),
-                color = Color.Black,
+                color = UiColor.surface,
                 shape = RoundedCornerShape(20.dp),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = .12f)),
+                border = BorderStroke(1.dp, UiColor.onPrimary.copy(alpha = .12f)),
                 shadowElevation = 24.dp
             ) {
                 val pointerDragModifier = if (editingPointer) {
@@ -4048,22 +4180,22 @@ private fun fittedScreenshotRectInPadding(
                         ) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(30.dp),
-                                color = Color.White,
+                                color = UiColor.onSurface,
                                 strokeWidth = 3.dp
                             )
                             Spacer(Modifier.height(12.dp))
-                            Text("Loading screenshot…", color = Color.White, fontSize = 14.sp)
+                            Text("Loading screenshot…", color = UiColor.onSurface, fontSize = 14.sp)
                         }
                     } else {
                         Column(
                             modifier = Modifier.align(Alignment.Center).padding(24.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            Icon(Icons.Default.Close, contentDescription = null, tint = Color(0xFFFFB4AB), modifier = Modifier.size(30.dp))
+                            Icon(Icons.Default.Close, contentDescription = null, tint = UiColor.error, modifier = Modifier.size(30.dp))
                             Spacer(Modifier.height(12.dp))
-                            Text("Screenshot unavailable", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                            Text("Screenshot unavailable", color = UiColor.onSurface, fontSize = 16.sp, fontWeight = FontWeight.Medium)
                             Spacer(Modifier.height(4.dp))
-                            Text("The file was moved, deleted, or could not be read.", color = Color(0xFFCBD5E1), fontSize = 13.sp, textAlign = TextAlign.Center)
+                            Text("The file was moved, deleted, or could not be read.", color = UiColor.extra.darkOnSurfaceMuted, fontSize = 13.sp, textAlign = TextAlign.Center)
                         }
                     }
                     if (editingPointer) {
@@ -4078,21 +4210,21 @@ private fun fittedScreenshotRectInPadding(
                             // The positioning stencil makes the exact x/y location
                             // readable while the user drags the connection pointer.
                             drawLine(
-                                Color.White.copy(alpha = .45f),
+                                pointerGuide,
                                 Offset(marker.x, 0f),
                                 Offset(marker.x, size.height),
                                 strokeWidth = 1.5f
                             )
                             drawLine(
-                                Color.White.copy(alpha = .45f),
+                                pointerGuide,
                                 Offset(0f, marker.y),
                                 Offset(size.width, marker.y),
                                 strokeWidth = 1.5f
                             )
-                            drawCircle(Color.Black.copy(alpha = .38f), 28f, marker)
-                            drawCircle(Color.White.copy(alpha = .9f), 21f, marker)
-                            drawCircle(Color(0xFF4F46E5), 12f, marker)
-                            drawCircle(Color.White, 4f, marker)
+                            drawCircle(pointerShadow, 28f, marker)
+                            drawCircle(pointerRing, 21f, marker)
+                            drawCircle(pointerAccent, 12f, marker)
+                            drawCircle(pointerCenter, 4f, marker)
                         }
                     }
                 }
@@ -4106,15 +4238,15 @@ private fun fittedScreenshotRectInPadding(
                         .clip(CircleShape)
                         .clickable(onClick = requestClose),
                     shape = CircleShape,
-                    color = Color(0xE61A1A1A),
-                    border = BorderStroke(1.dp, Color(0xFF2A2A2A)),
+                    color = UiColor.surface.copy(alpha = .96f),
+                    border = BorderStroke(1.dp, UiColor.extra.darkOutline),
                     shadowElevation = 6.dp
                 ) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Cancel",
-                            tint = Color.White,
+                            tint = UiColor.onSurface,
                             modifier = Modifier.size(26.dp)
                         )
                     }
@@ -4125,13 +4257,13 @@ private fun fittedScreenshotRectInPadding(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .offset(y = (-164).dp),
-                    color = Color(0xD9111111),
+                    color = UiColor.surfaceVariant,
                     shape = RoundedCornerShape(16.dp)
                 ) {
                     Text(
                         "Swipe to browse  •  ${screenPosition + 1} / $screenCount",
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        color = Color.White,
+                        color = UiColor.onSurface,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Medium
                     )
@@ -4142,13 +4274,13 @@ private fun fittedScreenshotRectInPadding(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .offset(y = (-164).dp),
-                    color = Color(0xD9111111),
+                    color = UiColor.surfaceVariant,
                     shape = RoundedCornerShape(16.dp)
                 ) {
                     Text(
                         "Drag the marker to adjust the pointer",
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        color = Color.White,
+                        color = UiColor.onSurface,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Medium
                     )
@@ -4161,9 +4293,9 @@ private fun fittedScreenshotRectInPadding(
                     .height(84.dp)
                     .offset(y = (-72).dp)
                     .clickable(interactionSource = consumeTapInteractionSource, indication = null, onClick = {}),
-                color = Color(0xFF1A1A1A),
+                color = UiColor.surface,
                 shape = RoundedCornerShape(28.dp),
-                border = BorderStroke(1.dp, Color(0xFF2A2A2A)),
+                border = BorderStroke(1.dp, UiColor.extra.darkOutline),
                 shadowElevation = 16.dp
             ) {
                 Row(
@@ -4207,7 +4339,7 @@ private fun fittedScreenshotRectInPadding(
                         R.drawable.ic_lightbox_delete,
                         "Delete",
                         onClick = { showDeleteConfirmation = true },
-                        tint = Color.White
+                        tint = UiColor.onSurface
                     )
                     LightboxDrawableAction(R.drawable.ic_lightbox_replace, "Replace", onClick = {
                         onReplace(screen)
@@ -4223,24 +4355,24 @@ private fun fittedScreenshotRectInPadding(
     if (showDeleteConfirmation) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirmation = false },
-            containerColor = Color.White,
+            containerColor = UiColor.surface,
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("⚠", color = Color(0xFFE8D372), fontSize = 32.sp)
+                    Text("⚠", color = UiColor.extra.warning, fontSize = 32.sp)
                     Spacer(Modifier.width(12.dp))
-                    Text("Deleting screenshot", color = Color(0xFF263F7D), fontWeight = FontWeight.Medium)
+                    Text("Deleting screenshot", color = UiColor.secondary, fontWeight = FontWeight.Medium)
                 }
             },
             text = {
                 Text(
                     "This screenshot will be permanently deleted. Are you sure you want to do this?",
-                    color = Color(0xFF222222),
+                    color = UiColor.onSurface,
                     fontSize = 17.sp
                 )
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirmation = false }) {
-                    Text("CANCEL", color = Color(0xFF263F7D))
+                    Text("CANCEL", color = UiColor.secondary)
                 }
             },
             confirmButton = {
@@ -4248,7 +4380,7 @@ private fun fittedScreenshotRectInPadding(
                     showDeleteConfirmation = false
                     onDelete(screen)
                     requestClose()
-                }) { Text("OK", color = Color(0xFF263F7D)) }
+                }) { Text("OK", color = UiColor.secondary) }
             }
         )
     }
@@ -4257,7 +4389,7 @@ private fun fittedScreenshotRectInPadding(
 @Composable private fun LightboxAction(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
-    tint: Color = Color.White,
+    tint: Color = UiColor.onSurface,
     onClick: () -> Unit
 ) {
     val interactionSource = remember { MutableInteractionSource() }
@@ -4268,7 +4400,7 @@ private fun fittedScreenshotRectInPadding(
         verticalArrangement = Arrangement.Center
     ) {
         Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
-            Icon(icon, label, tint = Color.White, modifier = Modifier.size(25.dp))
+            Icon(icon, label, tint = tint, modifier = Modifier.size(25.dp))
         }
         Spacer(Modifier.height(5.dp))
         Text(label, color = tint, fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = .1.sp)
@@ -4280,7 +4412,7 @@ private fun fittedScreenshotRectInPadding(
     @androidx.annotation.DrawableRes iconRes: Int,
     label: String,
     onClick: () -> Unit,
-    tint: Color = Color.White
+    tint: Color = UiColor.onSurface
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     Column(
@@ -4293,7 +4425,7 @@ private fun fittedScreenshotRectInPadding(
             Icon(
                 painter = painterResource(iconRes),
                 contentDescription = label,
-                tint = Color.Unspecified,
+                tint = tint,
                 modifier = Modifier.size(25.dp)
             )
         }
@@ -4312,7 +4444,9 @@ private fun fittedScreenshotRectInPadding(
     modifier: Modifier = Modifier,
     columnsOverride: Int? = null,
     onScreenClick: (ScreenEntity) -> Unit = {}
-) = Canvas(
+) {
+    val canvasSurface = MaterialTheme.colorScheme.surface
+    Canvas(
     modifier.pointerInput(screens, bitmaps, columnsOverride) {
         detectTapGestures { tap ->
             if (screens.isEmpty()) return@detectTapGestures
@@ -4525,7 +4659,8 @@ private fun fittedScreenshotRectInPadding(
             source.left + source.width * transition.fromMarkerX,
             source.top + source.height * transition.fromMarkerY
         )
-        drawCircle(Color.White, 7f, point)
+        drawCircle(canvasSurface, 7f, point)
         drawCircle(stroke, 4f, point)
+    }
     }
 }

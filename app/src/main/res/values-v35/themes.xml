@@ -2,6 +2,7 @@
     <!-- Android 15 draws the Compose content edge-to-edge. The crop overlay
          paints its own status-bar region, avoiding a separate dialog window. -->
     <style name="Theme.FlowSnap" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#0A0A0A</item>
         <item name="android:statusBarColor">#171717</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
