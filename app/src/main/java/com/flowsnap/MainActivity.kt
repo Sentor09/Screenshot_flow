@@ -10,6 +10,7 @@ import android.content.BroadcastReceiver
 import android.content.IntentFilter
 import android.content.Intent
 import android.content.ContentValues
+import android.content.ClipData
 import android.graphics.pdf.PdfDocument
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
@@ -183,9 +184,6 @@ import com.flowsnap.data.ScreenEntity
 import com.flowsnap.data.ScreenshotStorage
 import com.flowsnap.data.TransitionEntity
 import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
@@ -387,6 +385,7 @@ data class FlowCanvasState(
     val viewport: CanvasViewport
 )
 private enum class CanvasCommand { ZoomOut, ZoomIn, Fit, Arrange }
+private enum class ExportProgressKind { JPEG, PNG, PDF, PDF_AND_SVG, SVG }
 
 private fun canvasNodeSize(image: androidx.compose.ui.graphics.ImageBitmap?): CanvasSize {
     // Preserve the source aspect ratio, but keep very wide crops inside their
@@ -466,8 +465,6 @@ class MainActivity : ComponentActivity() {
 
 class FlowViewModel(application: android.app.Application) : AndroidViewModel(application) {
     private val dao = FlowDatabase.create(application).flowDao()
-    private val _exportInProgress = MutableStateFlow(false)
-    val exportInProgress: StateFlow<Boolean> = _exportInProgress.asStateFlow()
     // Keep the gallery query alive for the app lifetime. This prevents a
     // transient empty Home grid when returning from a completed capture.
     val flows = dao.observeAll().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
@@ -641,22 +638,44 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
 
     private fun <T> launchExport(work: () -> Result<T>, onResult: (Result<T>) -> Unit) =
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            _exportInProgress.value = true
             val result = try {
                 work()
             } catch (error: Throwable) {
                 Result.failure(error)
             }
-            _exportInProgress.value = false
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { onResult(result) }
         }
 
-    fun exportPdf(destination: Uri, screens: List<ScreenEntity>, transitions: List<TransitionEntity>, flow: FlowEntity, onResult: (Result<Unit>) -> Unit) =
-        launchExport({ writeFlowPdf(getApplication(), destination, screens, transitions, flow) }, onResult)
+    /** Creates a temporary PDF and SVG for Android's native share sheet. */
+    fun exportForSharing(screens: List<ScreenEntity>, transitions: List<TransitionEntity>, flow: FlowEntity, onResult: (Result<ArrayList<Uri>>) -> Unit) =
+        launchExport({
+            runCatching {
+                val context = getApplication<android.app.Application>()
+                val exportDirectory = java.io.File(context.cacheDir, "shared_exports").apply { mkdirs() }
+                val safeName = flow.name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "flowsnap" }
+                val exportName = "$safeName-${System.currentTimeMillis()}"
+                val pdfFile = java.io.File(exportDirectory, "$exportName.pdf")
+                val svgFile = java.io.File(exportDirectory, "$exportName.svg")
+                try {
+                    writeFlowPdf(context, Uri.fromFile(pdfFile), screens, transitions, flow).getOrThrow()
+                    writeFlowSvg(context, screens, transitions, flow, destination = svgFile).getOrThrow()
+                    arrayListOf(
+                        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", pdfFile),
+                        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", svgFile)
+                    )
+                } catch (error: Throwable) {
+                    pdfFile.delete()
+                    svgFile.delete()
+                    throw error
+                }
+            }
+        }, onResult)
     fun exportJpeg(screens: List<ScreenEntity>, transitions: List<TransitionEntity>, flow: FlowEntity, onResult: (Result<Uri>) -> Unit) =
         launchExport({ writeFlowJpeg(getApplication(), screens, transitions, flow) }, onResult)
     fun exportPng(screens: List<ScreenEntity>, transitions: List<TransitionEntity>, flow: FlowEntity, onResult: (Result<Uri>) -> Unit) =
         launchExport({ writeFlowPng(getApplication(), screens, transitions, flow) }, onResult)
+    fun exportPdf(screens: List<ScreenEntity>, transitions: List<TransitionEntity>, flow: FlowEntity, onResult: (Result<Uri>) -> Unit) =
+        launchExport({ writeFlowPdfToDownloads(getApplication(), screens, transitions, flow) }, onResult)
     @Suppress("unused")
     fun exportDrawio(screens: List<ScreenEntity>, transitions: List<TransitionEntity>, flow: FlowEntity, onResult: (Result<Uri>) -> Unit) =
         launchExport({ writeFlowDrawio(getApplication(), screens, transitions, flow) }, onResult)
@@ -1465,7 +1484,6 @@ private fun ReviewCaptureCropOverlay(
     val currentFlow by vm.flow(flowId).collectAsStateWithLifecycle(initialValue = null)
     val screens by vm.screens(flowId).collectAsStateWithLifecycle(initialValue = emptyList())
     val transitions by vm.transitions(flowId).collectAsStateWithLifecycle(initialValue = emptyList())
-    val exportInProgress by vm.exportInProgress.collectAsStateWithLifecycle()
     // Room emits the supplied null initial value before its first query result.
     // Navigating Home from that transient state made recent-diagram taps flash.
     if (currentFlow == null) {
@@ -1482,10 +1500,13 @@ private fun ReviewCaptureCropOverlay(
     var launchCaptureAfterNotificationRequest by rememberSaveable { mutableStateOf(false) }
     var exportJpegAfterPermission by rememberSaveable { mutableStateOf(false) }
     var exportPngAfterPermission by rememberSaveable { mutableStateOf(false) }
+    var exportPdfAfterPermission by rememberSaveable { mutableStateOf(false) }
     var exportSketchAfterPermission by rememberSaveable { mutableStateOf(false) }
     var showDeleteConfirmation by remember { mutableStateOf(false) }
     var showDiagramSettings by remember { mutableStateOf(false) }
     var showExportFormats by remember { mutableStateOf(false) }
+    var showShareGuide by remember { mutableStateOf(false) }
+    var activeExportKind by remember { mutableStateOf<ExportProgressKind?>(null) }
     var replacementTarget by remember { mutableStateOf<ScreenEntity?>(null) }
     val replaceImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         val target = replacementTarget
@@ -1496,21 +1517,30 @@ private fun ReviewCaptureCropOverlay(
             }
         }
     }
-    val exportPdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
-        uri?.let { destination ->
-            vm.exportPdf(destination, screens, transitions, flow) { result ->
-                result.onSuccess {
-                    android.widget.Toast.makeText(context, "PDF saved", android.widget.Toast.LENGTH_SHORT).show()
-                    openPdfPreview(context, destination)
-                }.onFailure { error ->
-                    android.util.Log.e("FlowSnapPdf", "PDF export failed", error)
-                    android.widget.Toast.makeText(context, "Could not save PDF: ${error.message ?: "unknown error"}", android.widget.Toast.LENGTH_LONG).show()
+    val startShareExport: () -> Unit = {
+        activeExportKind = ExportProgressKind.PDF_AND_SVG
+        vm.exportForSharing(screens, transitions, flow) { result ->
+            activeExportKind = null
+            result.onSuccess { files ->
+                val clipData = ClipData.newUri(context.contentResolver, "FlowSnap PDF", files.first())
+                files.drop(1).forEach { clipData.addItem(ClipData.Item(it)) }
+                val shareIntent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                    type = "application/octet-stream"
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, files)
+                    this.clipData = clipData
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
+                context.startActivity(Intent.createChooser(shareIntent, "Share FlowSnap PDF and SVG"))
+            }.onFailure { error ->
+                android.util.Log.e("FlowSnapShare", "Share export failed", error)
+                android.widget.Toast.makeText(context, "Could not create PDF and SVG: ${error.message ?: "unknown error"}", android.widget.Toast.LENGTH_LONG).show()
             }
         }
     }
     val startJpegExport = {
+        activeExportKind = ExportProgressKind.JPEG
         vm.exportJpeg(screens, transitions, flow) { result ->
+            activeExportKind = null
             result.onSuccess {
                 android.widget.Toast.makeText(context, "JPEG saved to Pictures/FlowSnap", android.widget.Toast.LENGTH_LONG).show()
             }.onFailure { error ->
@@ -1524,7 +1554,9 @@ private fun ReviewCaptureCropOverlay(
         else android.widget.Toast.makeText(context, "Storage permission is required to save JPEG files", android.widget.Toast.LENGTH_LONG).show()
     }
     val startPngExport = {
+        activeExportKind = ExportProgressKind.PNG
         vm.exportPng(screens, transitions, flow) { result ->
+            activeExportKind = null
             result.onSuccess {
                 android.widget.Toast.makeText(context, "PNG saved to Pictures/FlowSnap", android.widget.Toast.LENGTH_LONG).show()
             }.onFailure { error ->
@@ -1537,8 +1569,26 @@ private fun ReviewCaptureCropOverlay(
         if (granted) exportPngAfterPermission = true
         else android.widget.Toast.makeText(context, "Storage permission is required to save PNG files", android.widget.Toast.LENGTH_LONG).show()
     }
+    val startPdfExport = {
+        activeExportKind = ExportProgressKind.PDF
+        vm.exportPdf(screens, transitions, flow) { result ->
+            activeExportKind = null
+            result.onSuccess {
+                android.widget.Toast.makeText(context, "PDF saved to Downloads/FlowSnap", android.widget.Toast.LENGTH_LONG).show()
+            }.onFailure { error ->
+                android.util.Log.e("FlowSnapPdf", "PDF export failed", error)
+                android.widget.Toast.makeText(context, "Could not save PDF: ${error.message ?: "unknown error"}", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+    val pdfStoragePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) exportPdfAfterPermission = true
+        else android.widget.Toast.makeText(context, "Storage permission is required to save PDF files", android.widget.Toast.LENGTH_LONG).show()
+    }
     val startSketchExport = {
+        activeExportKind = ExportProgressKind.SVG
         vm.exportSvg(screens, transitions, flow) { result ->
+            activeExportKind = null
             result.onSuccess {
                 android.widget.Toast.makeText(context, "SVG saved. Open in Figma.", android.widget.Toast.LENGTH_LONG).show()
             }.onFailure { error ->
@@ -1561,6 +1611,12 @@ private fun ReviewCaptureCropOverlay(
         if (exportPngAfterPermission) {
             exportPngAfterPermission = false
             startPngExport()
+        }
+    }
+    androidx.compose.runtime.LaunchedEffect(exportPdfAfterPermission) {
+        if (exportPdfAfterPermission) {
+            exportPdfAfterPermission = false
+            startPdfExport()
         }
     }
     androidx.compose.runtime.LaunchedEffect(exportSketchAfterPermission) {
@@ -1689,7 +1745,13 @@ private fun ReviewCaptureCropOverlay(
             EditorDrawableCircle(R.drawable.ic_flow_save, "Save", onClick = {
                 showExportFormats = true
             }, enabled = hasScreens)
-            EditorCircle(Icons.Default.PictureAsPdf, "Export PDF", onClick = { exportPdf.launch(exportFileName(flow.name, "pdf")) }, enabled = hasScreens)
+            EditorDrawableCircle(
+                iconRes = R.drawable.ic_google_drive,
+                label = "Share PDF and SVG with Google Drive",
+                onClick = { showShareGuide = true },
+                enabled = hasScreens,
+                iconTint = Color.Unspecified
+            )
             EditorDrawableCircle(R.drawable.ic_flow_delete, "Delete diagram", onClick = { showDeleteConfirmation = true })
         }
         Column(Modifier.align(Alignment.BottomEnd).padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp), horizontalAlignment = Alignment.End) {
@@ -1712,7 +1774,9 @@ private fun ReviewCaptureCropOverlay(
             onDismiss = { showExportFormats = false },
             onExportPdf = {
                 showExportFormats = false
-                exportPdf.launch(exportFileName(flow.name, "pdf"))
+                if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P && ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                    pdfStoragePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                } else startPdfExport()
             },
             onExportJpeg = {
                 showExportFormats = false
@@ -1738,39 +1802,16 @@ private fun ReviewCaptureCropOverlay(
             }
         )
     }
-    if (exportInProgress) {
-        Dialog(
-            onDismissRequest = { },
-            properties = DialogProperties(
-                dismissOnBackPress = false,
-                dismissOnClickOutside = false
-            )
-        ) {
-            Surface(
-                color = Color.White,
-                shape = RoundedCornerShape(16.dp),
-                shadowElevation = 8.dp
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(28.dp),
-                        strokeWidth = 3.dp,
-                        color = Color(0xFF4F46E5)
-                    )
-                    Spacer(Modifier.width(16.dp))
-                    Text(
-                        "Saving export…",
-                        color = Color(0xFF202B3B),
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
+    if (showShareGuide) {
+        ShareToDriveGuideDialog(
+            onDismiss = { showShareGuide = false },
+            onContinue = {
+                showShareGuide = false
+                startShareExport()
             }
-        }
+        )
     }
+    activeExportKind?.let { kind -> ExportProgressDialog(kind) }
     if (showDeleteConfirmation) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirmation = false },
@@ -1866,6 +1907,199 @@ private fun ReviewCaptureCropOverlay(
     }
 }
 
+@Composable
+private fun ShareToDriveGuideDialog(onDismiss: () -> Unit, onContinue: () -> Unit) {
+    val primaryBlue = Color(0xFF4F46E5)
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(.88f),
+            color = Color.White,
+            shape = RoundedCornerShape(28.dp),
+            border = BorderStroke(1.dp, Color(0xFFE2E8F2)),
+            shadowElevation = 18.dp
+        ) {
+            Column(Modifier.padding(26.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        modifier = Modifier.size(54.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        color = Color(0xFFF1F6FF)
+                    ) {
+                        Icon(
+                            painterResource(R.drawable.ic_google_drive),
+                            contentDescription = null,
+                            tint = Color.Unspecified,
+                            modifier = Modifier.padding(11.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(15.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Save to Google Drive", color = Color(0xFF1F2D43), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(2.dp))
+                        Text("PDF + SVG export", color = primaryBlue, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+                Spacer(Modifier.height(22.dp))
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFFF7F9FC)
+                ) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
+                        DriveGuideStep("1", "FlowSnap creates your PDF and SVG")
+                        DriveGuideStep("2", "Choose Google Drive in the share menu")
+                        DriveGuideStep("3", "Select an account and folder, then upload")
+                    }
+                }
+                Spacer(Modifier.height(22.dp))
+                Button(
+                    onClick = onContinue,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = Color.White),
+                    contentPadding = PaddingValues(vertical = 14.dp)
+                ) {
+                    Text("CONTINUE TO SHARE", fontWeight = FontWeight.Bold)
+                }
+                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                    Text("NOT NOW", color = Color(0xFF64748B), fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DriveGuideStep(number: String, text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Surface(modifier = Modifier.size(25.dp), shape = CircleShape, color = Color(0xFF4F46E5)) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(number, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(text, color = Color(0xFF324055), fontSize = 14.sp, lineHeight = 19.sp)
+    }
+}
+
+private data class ExportProgressDetails(
+    val iconRes: Int,
+    val keepIconColors: Boolean,
+    val title: String,
+    val description: String,
+    val destination: String,
+    val usePdfIcon: Boolean = false
+)
+
+@Composable
+private fun ExportProgressDialog(kind: ExportProgressKind) {
+    val primaryBlue = Color(0xFF4F46E5)
+    val details = when (kind) {
+        ExportProgressKind.JPEG -> ExportProgressDetails(
+            iconRes = R.drawable.ic_flow_save,
+            keepIconColors = false,
+            title = "Saving JPEG image",
+            description = "Creating a high-quality image of your diagram.",
+            destination = "It will be saved to Pictures/FlowSnap."
+        )
+        ExportProgressKind.PNG -> ExportProgressDetails(
+            iconRes = R.drawable.ic_flow_save,
+            keepIconColors = false,
+            title = "Saving PNG image",
+            description = "Creating a portable PNG image of your diagram.",
+            destination = "It will be saved to Pictures/FlowSnap."
+        )
+        ExportProgressKind.PDF -> ExportProgressDetails(
+            iconRes = R.drawable.ic_flow_save,
+            keepIconColors = false,
+            usePdfIcon = true,
+            title = "Saving PDF document",
+            description = "Creating a printable PDF version of your diagram.",
+            destination = "It will be saved to Downloads/FlowSnap."
+        )
+        ExportProgressKind.PDF_AND_SVG -> ExportProgressDetails(
+            iconRes = R.drawable.ic_google_drive,
+            keepIconColors = true,
+            title = "Preparing PDF and SVG",
+            description = "Creating files for Google Drive.",
+            destination = "The Android share screen will open automatically."
+        )
+        ExportProgressKind.SVG -> ExportProgressDetails(
+            iconRes = R.drawable.ic_flow_save,
+            keepIconColors = false,
+            title = "Saving SVG diagram",
+            description = "Creating an editable vector version of your diagram.",
+            destination = "It will be saved to Downloads/FlowSnap."
+        )
+    }
+    Dialog(
+        onDismissRequest = { },
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(.88f),
+            color = Color.White,
+            shape = RoundedCornerShape(28.dp),
+            border = BorderStroke(1.dp, Color(0xFFE2E8F2)),
+            shadowElevation = 18.dp
+        ) {
+            Column(Modifier.padding(26.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Surface(
+                    modifier = Modifier.size(60.dp),
+                    shape = CircleShape,
+                    color = Color(0xFFF1F6FF)
+                ) {
+                    if (details.usePdfIcon) {
+                        Icon(
+                            Icons.Default.PictureAsPdf,
+                            contentDescription = null,
+                            tint = primaryBlue,
+                            modifier = Modifier.padding(13.dp)
+                        )
+                    } else {
+                        Icon(
+                            painterResource(details.iconRes),
+                            contentDescription = null,
+                            tint = if (details.keepIconColors) Color.Unspecified else primaryBlue,
+                            modifier = Modifier.padding(13.dp)
+                        )
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+                Text(details.title, color = Color(0xFF1F2D43), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    details.description,
+                    color = Color(0xFF66758A),
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(22.dp))
+                CircularProgressIndicator(modifier = Modifier.size(48.dp), strokeWidth = 4.dp, color = primaryBlue)
+                Spacer(Modifier.height(22.dp))
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color(0xFFF7F9FC)
+                ) {
+                    Text(
+                        details.destination,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
+                        color = Color(0xFF4F5D70),
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
+    }
+}
+
 /** Export chooser shown by the bottom-left floppy-disk control. */
 @Composable private fun ExportFormatDialog(
     onDismiss: () -> Unit,
@@ -1908,9 +2142,11 @@ private fun ReviewCaptureCropOverlay(
                 Spacer(Modifier.height(18.dp))
                 formats.forEach { (format, description) ->
                     val isSelected = selected == format
+                    val rowShape = RoundedCornerShape(16.dp)
                     Row(
                         modifier = Modifier.fillMaxWidth()
-                            .background(if (isSelected) Color(0x0D24519B) else Color.Transparent, RoundedCornerShape(16.dp))
+                            .clip(rowShape)
+                            .background(if (isSelected) Color(0x0D24519B) else Color.Transparent)
                             .clickable { selected = format }
                             .padding(horizontal = 12.dp, vertical = 13.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -1921,7 +2157,13 @@ private fun ReviewCaptureCropOverlay(
                             Text(format, color = Color(0xFF202B3B), fontSize = 19.sp, fontWeight = FontWeight.Bold)
                             if (isSelected) {
                                 Spacer(Modifier.height(3.dp))
-                                Text(description, color = Color(0xFF708096), fontSize = 13.sp, lineHeight = 18.sp)
+                                Text(
+                                    description,
+                                    color = Color(0xFF708096),
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }
@@ -2404,8 +2646,10 @@ private fun Modifier.diagramGrid() = this.drawBehind {
  * Decodes only the pixels an export can actually display. Screenshot captures
  * are commonly 1080 x 2400, while an export node is usually 300px wide.
  */
-private const val EDITABLE_EXPORT_IMAGE_WIDTH = 720
-private const val EDITABLE_EXPORT_IMAGE_HEIGHT = 1600
+// SVG nodes are 300px wide. A small amount of oversampling keeps them sharp
+// without making the generated SVG and Android share sheet unnecessarily slow.
+private const val EDITABLE_EXPORT_IMAGE_WIDTH = 360
+private const val EDITABLE_EXPORT_IMAGE_HEIGHT = 800
 
 /** A stable, filesystem-safe export name without timestamps or generated IDs. */
 private fun exportFileName(flowName: String, extension: String): String =
@@ -2443,6 +2687,13 @@ private fun decodeBitmap(context: Context, location: String, options: android.gr
     if (location.startsWith("content://")) {
         context.contentResolver.openInputStream(location.toUri())?.use { android.graphics.BitmapFactory.decodeStream(it, null, options) }
     } else android.graphics.BitmapFactory.decodeFile(location, options)
+
+/** Reads dimensions only, so SVG placement can preserve each source image's aspect ratio. */
+private fun sourceImageAspectRatio(context: Context, path: String): Double? = runCatching {
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    decodeBitmap(context, path, bounds)
+    if (bounds.outWidth > 0 && bounds.outHeight > 0) bounds.outWidth.toDouble() / bounds.outHeight else null
+}.getOrNull()
 
 /** Writes the same paged 7 x 4 flow arrangement to a user-selected PDF file. */
 private fun writeFlowPdf(
@@ -2492,9 +2743,9 @@ private fun writeFlowPdf(
                 val indexes = pageScreens.withIndex().associate { it.value.id to it.index }
                 pageScreens.forEachIndexed { index, screen ->
                     val target = positions[index]
-                    // Keep multiple source pixels per PDF pixel. PdfDocument can
-                    // then downsample smoothly instead of embedding a tiny preview.
-                    decodeExportBitmap(context, screen.imagePath, (target.width() * 3).toInt(), (target.height() * 3).toInt())?.let { bitmap ->
+                    // Two source pixels per PDF pixel keep the document sharp while
+                    // avoiding oversized temporary share exports.
+                    decodeExportBitmap(context, screen.imagePath, (target.width() * 2).toInt(), (target.height() * 2).toInt())?.let { bitmap ->
                         val scale = minOf(target.width() / bitmap.width, target.height() / bitmap.height)
                         val width = bitmap.width * scale
                         val height = bitmap.height * scale
@@ -2519,12 +2770,55 @@ private fun writeFlowPdf(
                 drawPdfMetadataTable(canvas, paint, flow, pageNumber + 1)
                 document.finishPage(page)
             }
-            val output = context.contentResolver.openOutputStream(destination)
-                ?: error("Unable to open the selected PDF destination")
+            val output = if (destination.scheme == "file") {
+                java.io.FileOutputStream(destination.path ?: error("Invalid PDF destination"))
+            } else {
+                context.contentResolver.openOutputStream(destination)
+                    ?: error("Unable to open the selected PDF destination")
+            }
             output.use { stream -> document.writeTo(stream) }
         } finally {
             document.close()
         }
+}
+
+/** Saves a standalone PDF to Downloads/FlowSnap. */
+private fun writeFlowPdfToDownloads(
+    context: Context,
+    screens: List<ScreenEntity>,
+    transitions: List<TransitionEntity>,
+    flow: FlowEntity
+): Result<Uri> = runCatching {
+    val resolver = context.contentResolver
+    val displayName = exportFileName(flow.name, "pdf")
+    val values = ContentValues().apply {
+        put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+        put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/FlowSnap")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        } else {
+            val directory = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "FlowSnap")
+            check(directory.exists() || directory.mkdirs()) { "Unable to create Downloads/FlowSnap" }
+            put(MediaStore.MediaColumns.DATA, java.io.File(directory, displayName).absolutePath)
+        }
+    }
+    val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    } else {
+        MediaStore.Files.getContentUri("external")
+    }
+    val uri = resolver.insert(collection, values) ?: error("Unable to create PDF in Downloads")
+    try {
+        writeFlowPdf(context, uri, screens, transitions, flow).getOrThrow()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+        }
+        uri
+    } catch (error: Throwable) {
+        resolver.delete(uri, null, null)
+        throw error
+    }
 }
 
 /** Renders the complete linear diagram into one high-quality JPEG in Pictures/FlowSnap. */
@@ -2704,7 +2998,8 @@ private fun writeFlowDrawio(
     context: Context,
     screens: List<ScreenEntity>,
     transitions: List<TransitionEntity>,
-    flow: FlowEntity
+    flow: FlowEntity,
+    destination: java.io.File? = null
 ): Result<Uri> = runCatching {
     require(screens.isNotEmpty()) { "The diagram has no screenshots" }
     val columns = flow.preferredColumns.coerceIn(1, screens.size)
@@ -2716,26 +3011,31 @@ private fun writeFlowDrawio(
     val screenIndex = screens.withIndex().associate { it.value.id to it.index }
     val resolver = context.contentResolver
     val displayName = flow.name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "flowsnap" } + ".drawio"
-    val values = ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-        put(MediaStore.MediaColumns.MIME_TYPE, "application/xml")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/FlowSnap")
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
-        } else {
-            val directory = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "FlowSnap")
-            check(directory.exists() || directory.mkdirs()) { "Unable to create Downloads/FlowSnap" }
-            put(MediaStore.MediaColumns.DATA, java.io.File(directory, displayName).absolutePath)
-        }
-    }
-    val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    val uri = if (destination != null) {
+        Uri.fromFile(destination)
     } else {
-        MediaStore.Files.getContentUri("external")
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+            put(MediaStore.MediaColumns.MIME_TYPE, "application/xml")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/FlowSnap")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            } else {
+                val directory = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "FlowSnap")
+                check(directory.exists() || directory.mkdirs()) { "Unable to create Downloads/FlowSnap" }
+                put(MediaStore.MediaColumns.DATA, java.io.File(directory, displayName).absolutePath)
+            }
+        }
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        } else {
+            MediaStore.Files.getContentUri("external")
+        }
+        resolver.insert(collection, values) ?: error("Unable to create Draw.io file in MediaStore")
     }
-    val uri = resolver.insert(collection, values) ?: error("Unable to create Draw.io file in MediaStore")
     try {
-        resolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
+        val output = destination?.outputStream() ?: resolver.openOutputStream(uri)
+        output?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
             // Stream each 720px high-density preview immediately. Keeping all Base64 images in a
             // StringBuilder caused large diagrams to stall during garbage collection.
             writer.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
@@ -2772,12 +3072,12 @@ private fun writeFlowDrawio(
             writer.write("      </root>\n    </mxGraphModel>\n  </diagram>\n</mxfile>\n")
         }
             ?: error("Unable to open Draw.io output stream")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (destination == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
         }
         uri
     } catch (error: Throwable) {
-        resolver.delete(uri, null, null)
+        if (destination != null) destination.delete() else resolver.delete(uri, null, null)
         throw error
     }
 }
@@ -2790,47 +3090,70 @@ private fun writeFlowSvg(
     context: Context,
     screens: List<ScreenEntity>,
     transitions: List<TransitionEntity>,
-    flow: FlowEntity
+    flow: FlowEntity,
+    destination: java.io.File? = null
 ): Result<Uri> = runCatching {
     require(screens.isNotEmpty()) { "The diagram has no screenshots" }
     val columns = flow.preferredColumns.coerceIn(1, screens.size)
     val margin = 40.0
     val gap = 28.0
     val nodeWidth = 300.0
-    val nodeHeight = 645.0
     val rows = (screens.size + columns - 1) / columns
+    // Match the actual screenshot/photo dimensions. This also protects the
+    // output in SVG viewers that do not fully honor preserveAspectRatio.
+    val nodeHeights = screens.map { screen ->
+        val aspectRatio = sourceImageAspectRatio(context, screen.imagePath) ?: (300.0 / 645.0)
+        (nodeWidth / aspectRatio).coerceIn(220.0, 900.0)
+    }
+    val rowHeights = List(rows) { row ->
+        val start = row * columns
+        nodeHeights.subList(start, minOf(start + columns, nodeHeights.size)).maxOrNull() ?: 645.0
+    }
+    val rowTops = buildList(rows) {
+        var currentTop = margin
+        rowHeights.forEach { rowHeight ->
+            add(currentTop)
+            currentTop += rowHeight + gap
+        }
+    }
     val width = margin * 2 + columns * nodeWidth + (columns - 1) * gap
-    val height = margin * 2 + rows * nodeHeight + (rows - 1) * gap
+    val height = margin * 2 + rowHeights.sum() + (rows - 1) * gap
     val positions = List(screens.size) { index ->
         val row = index / columns
         val column = index % columns
+        val nodeHeight = nodeHeights[index]
         android.graphics.RectF(
             (margin + column * (nodeWidth + gap)).toFloat(),
-            (margin + row * (nodeHeight + gap)).toFloat(),
+            rowTops[row].toFloat(),
             (margin + column * (nodeWidth + gap) + nodeWidth).toFloat(),
-            (margin + row * (nodeHeight + gap) + nodeHeight).toFloat()
+            (rowTops[row] + nodeHeight).toFloat()
         )
     }
     val screenIndex = screens.withIndex().associate { it.value.id to it.index }
     val connectorColor = String.format(java.util.Locale.US, "#%06X", flow.connectorColor and 0xFFFFFF)
     val resolver = context.contentResolver
     val displayName = exportFileName(flow.name, "svg")
-    val values = ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-        put(MediaStore.MediaColumns.MIME_TYPE, "image/svg+xml")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/FlowSnap")
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
-        } else {
-            val directory = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "FlowSnap")
-            check(directory.exists() || directory.mkdirs()) { "Unable to create Downloads/FlowSnap" }
-            put(MediaStore.MediaColumns.DATA, java.io.File(directory, displayName).absolutePath)
+    val uri = if (destination != null) {
+        Uri.fromFile(destination)
+    } else {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/svg+xml")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/FlowSnap")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            } else {
+                val directory = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "FlowSnap")
+                check(directory.exists() || directory.mkdirs()) { "Unable to create Downloads/FlowSnap" }
+                put(MediaStore.MediaColumns.DATA, java.io.File(directory, displayName).absolutePath)
+            }
         }
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) else MediaStore.Files.getContentUri("external")
+        resolver.insert(collection, values) ?: error("Unable to create SVG file in MediaStore")
     }
-    val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) else MediaStore.Files.getContentUri("external")
-    val uri = resolver.insert(collection, values) ?: error("Unable to create SVG file in MediaStore")
     try {
-        resolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
+        val output = destination?.outputStream() ?: resolver.openOutputStream(uri)
+        output?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
             writer.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
             writer.write("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"$width\" height=\"$height\" viewBox=\"0 0 $width $height\">\n")
             writer.write("  <title>${xmlEscape(flow.name)}</title>\n  <rect width=\"100%\" height=\"100%\" fill=\"white\"/>\n")
@@ -2882,18 +3205,18 @@ private fun writeFlowSvg(
             writer.write("</svg>\n")
         }
             ?: error("Unable to open SVG output stream")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+        if (destination == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
         uri
     } catch (error: Throwable) {
-        resolver.delete(uri, null, null)
+        if (destination != null) destination.delete() else resolver.delete(uri, null, null)
         throw error
     }
 }
 
 /** Encodes the compact preview used by Draw.io/SVG without Base64 line wraps. */
 private fun screenshotPngBase64(context: Context, path: String): String? = runCatching {
-    // Keep a 2.4x asset for the 300px SVG/Draw.io node: it stays crisp in Figma
-    // when zoomed or enlarged without retaining full device-resolution captures.
+    // Keep a modestly oversized asset for the 300px SVG/Draw.io node: it stays
+    // crisp in Figma without retaining full device-resolution captures.
     val bitmap = decodeExportBitmap(context, path, EDITABLE_EXPORT_IMAGE_WIDTH, EDITABLE_EXPORT_IMAGE_HEIGHT) ?: return@runCatching null
     try {
         val bytes = java.io.ByteArrayOutputStream().use { output ->
@@ -3387,19 +3710,6 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
     return value.substring(0, end) + suffix
 }
 
-/** Opens the SAF document URI after a successful export. It remains usable from Downloads. */
-private fun openPdfPreview(context: Context, uri: Uri) {
-    val viewIntent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(uri, "application/pdf")
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    }
-    try {
-        context.startActivity(Intent.createChooser(viewIntent, "Open FlowSnap PDF"))
-    } catch (_: android.content.ActivityNotFoundException) {
-        android.widget.Toast.makeText(context, "PDF saved. Install a PDF viewer to open it.", android.widget.Toast.LENGTH_LONG).show()
-    }
-}
-
 @Composable private fun EditorCircle(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, large: Boolean = false, enabled: Boolean = true) {
     val size = if (large) 74.dp else 48.dp
     val tint = if (enabled) Color(0xFF4F46E5) else Color(0xFFB8B8B8)
@@ -3407,12 +3717,17 @@ private fun openPdfPreview(context: Context, uri: Uri) {
 }
 
 /** Renders the supplied Android Studio vector assets in the existing editor control style. */
-@Composable private fun EditorDrawableCircle(iconRes: Int, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, large: Boolean = false, enabled: Boolean = true) {
+@Composable private fun EditorDrawableCircle(iconRes: Int, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, large: Boolean = false, enabled: Boolean = true, iconTint: Color? = null) {
     val size = if (large) 74.dp else 48.dp
     val tint = if (enabled) Color(0xFF4F46E5) else Color(0xFFB8B8B8)
     Surface(modifier = modifier.size(size), shape = CircleShape, color = Color.Transparent, border = BorderStroke(if (large) 3.dp else 2.dp, tint)) {
         Box(Modifier.fillMaxSize().clip(CircleShape).clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) {
-            Icon(painterResource(iconRes), label, tint = tint, modifier = Modifier.size(if (large) 42.dp else 27.dp))
+            Icon(
+                painterResource(iconRes),
+                label,
+                tint = if (enabled) iconTint ?: tint else tint,
+                modifier = Modifier.size(if (large) 42.dp else 27.dp)
+            )
         }
     }
 }
