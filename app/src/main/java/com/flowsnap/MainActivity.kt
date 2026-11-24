@@ -33,8 +33,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.aspectRatio
@@ -51,6 +53,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
@@ -237,7 +240,8 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
         val start = CanvasPoint(source.left + source.width * transition.fromMarkerX, source.top + source.height * transition.fromMarkerY)
         Triple(start, nearestPointOnCanvasBounds(start, destination), transition)
     }
-    val connector = Color(flow.connectorColor.toInt())
+    // Canvas connectors intentionally use FlowSnap's vivid green treatment.
+    val connector = Color(ConnectorPalette.Green.toInt())
     val endpoints = deriveCanvasEndpoints(state.screens.map { it.id }.toSet(), state.transitions.map { CanvasEdge(it.fromScreenId, it.toScreenId) })
     state.screens.forEach { screen ->
         val bounds = nodeBounds.getValue(screen.id)
@@ -263,6 +267,11 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
                 "END" -> colors.error
                 else -> colors.primary
             }
+            val badgeContentColor = when (it) {
+                "START" -> colors.onTertiary
+                "END" -> colors.onError
+                else -> colors.onPrimary
+            }
             val badgeWidth = when (it) {
                 "START / END" -> 104f
                 "START" -> 64f
@@ -270,9 +279,35 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
             }
             val badgeTopLeft = Offset(rect.left + 8f, rect.top + 8f)
             drawRoundRect(badgeColor, topLeft = badgeTopLeft, size = androidx.compose.ui.geometry.Size(badgeWidth, 26f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(13f, 13f))
-            drawCircle(colors.onPrimary.copy(alpha = .9f), radius = 4f, center = Offset(badgeTopLeft.x + 12f, badgeTopLeft.y + 13f))
-            drawContext.canvas.nativeCanvas.drawText(it, badgeTopLeft.x + 21f, badgeTopLeft.y + 17f, android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = colors.onPrimary.toArgb(); textSize = 11f; typeface = android.graphics.Typeface.DEFAULT_BOLD })
+            drawCircle(badgeContentColor.copy(alpha = .9f), radius = 4f, center = Offset(badgeTopLeft.x + 12f, badgeTopLeft.y + 13f))
+            drawContext.canvas.nativeCanvas.drawText(it, badgeTopLeft.x + 21f, badgeTopLeft.y + 17f, android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = badgeContentColor.toArgb(); textSize = 11f; typeface = android.graphics.Typeface.DEFAULT_BOLD })
         }
+    }
+    // Connectors deliberately render over screenshots so their route and
+    // arrowheads remain visible from the capture marker to the target edge.
+    if (flow.showMobileStencils) edges.forEach { (start, end, _) ->
+        val startPoint = screenPoint(start)
+        val endPoint = screenPoint(end)
+        val destinationIsSideEdge = kotlin.math.abs(endPoint.x - startPoint.x) >= kotlin.math.abs(endPoint.y - startPoint.y)
+        val bend = if (destinationIsSideEdge) {
+            Offset(startPoint.x, endPoint.y)
+        } else {
+            Offset(endPoint.x, startPoint.y)
+        }
+        val strokeWidth = (2.5f * viewport.zoom).coerceIn(2f, 4f)
+        drawLine(connector, startPoint, bend, strokeWidth)
+        drawLine(connector, bend, endPoint, strokeWidth)
+
+        val finalStart = if ((endPoint - bend).getDistance() > .5f) bend else startPoint
+        val direction = endPoint - finalStart
+        val length = direction.getDistance().coerceAtLeast(1f)
+        val unit = Offset(direction.x / length, direction.y / length)
+        val perpendicular = Offset(-unit.y, unit.x)
+        val arrowLength = (10f * viewport.zoom).coerceIn(7f, 16f)
+        val arrowWidth = arrowLength * .58f
+        val base = endPoint - Offset(unit.x * arrowLength, unit.y * arrowLength)
+        drawLine(connector, endPoint, base + Offset(perpendicular.x * arrowWidth, perpendicular.y * arrowWidth), strokeWidth)
+        drawLine(connector, endPoint, base - Offset(perpendicular.x * arrowWidth, perpendicular.y * arrowWidth), strokeWidth)
     }
     if (flow.showMobileStencils) edges.forEach { (start, _, _) ->
         val marker = screenPoint(start)
@@ -292,7 +327,9 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
     onCommandHandled: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var viewport by remember(state.flow?.id) { mutableStateOf(state.viewport) }
+    // Canvas mode is a fresh overview on every open. Node locations persist,
+    // but a prior zoom or pan must not change the initial fit-to-flow view.
+    var viewport by remember(state.flow?.id) { mutableStateOf(CanvasViewport()) }
     var selectedId by remember(state.flow?.id) { mutableStateOf<String?>(null) }
     var positions by remember(state.screens) { mutableStateOf(state.screens.associate { it.id to CanvasPoint(it.canvasX, it.canvasY) }) }
     var canvasSize by remember { mutableStateOf(CanvasSize(0f, 0f)) }
@@ -302,9 +339,10 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
     val currentViewport by rememberUpdatedState(viewport)
     val currentNodes by rememberUpdatedState(nodeModels)
     val currentScreens by rememberUpdatedState(displayScreens)
-    LaunchedEffect(state.flow?.id, state.screens.size, canvasSize.width, canvasSize.height) {
-        if (canvasSize.width > 0f && canvasSize.height > 0f && state.viewport == CanvasViewport()) {
-            viewport = vm.fitCanvasViewport(displayScreens, bitmaps, canvasSize, padding = 32f)
+    LaunchedEffect(state.flow?.id, canvasSize.width, canvasSize.height) {
+        if (canvasSize.width > 0f && canvasSize.height > 0f) {
+            val fittedViewport = vm.fitCanvasViewport(displayScreens, bitmaps, canvasSize, padding = 32f)
+            viewport = fittedViewport
         }
     }
     // One-time compatibility reflow: canvases created before the column
@@ -330,7 +368,6 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
             CanvasCommand.Arrange -> state.flow?.let { vm.autoLayoutCanvas(it, displayScreens) }
             null -> return@LaunchedEffect
         }
-        state.flow?.let { vm.persistCanvasViewport(it.id, viewport) }
         onCommandHandled()
     }
     Box(modifier) {
@@ -363,8 +400,8 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
                             displayScreens.firstOrNull { it.id == selectedNodeToMove.id }?.let { vm.persistCanvasNodePosition(it, moved) }
                         } else {
                             val zoomed = if (zoom == 1f) activeViewport else activeViewport.zoomedAround(CanvasPoint(centroid.x, centroid.y), (activeViewport.zoom * zoom).coerceIn(.15f, 3f))
-                            viewport = zoomed.pannedBy(CanvasPoint(pan.x, pan.y))
-                            state.flow?.let { vm.persistCanvasViewport(it.id, viewport) }
+                            val updatedViewport = zoomed.pannedBy(CanvasPoint(pan.x, pan.y))
+                            viewport = updatedViewport
                         }
                     }
                 }
@@ -373,15 +410,10 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
 }
 
 @Composable private fun SmallCanvasControl(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
-    val interactionSource = remember { MutableInteractionSource() }
     Surface(
         shape = CircleShape,
         color = UiColor.secondary,
-        modifier = Modifier.size(40.dp).clickable(
-            interactionSource = interactionSource,
-            indication = null,
-            onClick = onClick
-        )
+        modifier = Modifier.size(40.dp).clickable(onClick = onClick)
     ) {
         Box(contentAlignment = Alignment.Center) { Icon(icon, label, tint = UiColor.onSecondary, modifier = Modifier.size(21.dp)) }
     }
@@ -462,10 +494,17 @@ class MainActivity : ComponentActivity() {
         acceptReviewIntent(intent)
         ContextCompat.registerReceiver(this, captureReadyReceiver, IntentFilter(CaptureService.ACTION_CAPTURE_READY), ContextCompat.RECEIVER_NOT_EXPORTED)
         setContent {
+            // isSystemInDarkTheme observes Configuration changes. With no
+            // explicit in-app choice saved, this stays in sync live.
             val systemDarkTheme = isSystemInDarkTheme()
             val themePreferences = remember { getSharedPreferences(APP_SETTINGS, MODE_PRIVATE) }
-            var useDarkTheme by remember {
-                mutableStateOf(themePreferences.getString(PREF_THEME_MODE, null)?.equals(THEME_DARK) ?: systemDarkTheme)
+            var themeOverride by remember {
+                mutableStateOf(themePreferences.getString(PREF_THEME_MODE, null))
+            }
+            val useDarkTheme = when (themeOverride) {
+                THEME_DARK -> true
+                THEME_LIGHT -> false
+                else -> systemDarkTheme
             }
             val colorScheme = if (useDarkTheme) FlowSnapDarkColorScheme else FlowSnapLightColorScheme
             val extraColors = if (useDarkTheme) FlowSnapDarkExtraColors else FlowSnapLightExtraColors
@@ -480,10 +519,12 @@ class MainActivity : ComponentActivity() {
                     FlowSnapApp(
                         review = review,
                         dismissReview = { review = null },
-                        useDarkTheme = useDarkTheme,
-                        onThemeChange = { darkTheme ->
-                            useDarkTheme = darkTheme
-                            themePreferences.edit { putString(PREF_THEME_MODE, if (darkTheme) THEME_DARK else THEME_LIGHT) }
+                        themeOverride = themeOverride,
+                        onThemeChange = { mode ->
+                            themeOverride = mode
+                            themePreferences.edit {
+                                if (mode == null) remove(PREF_THEME_MODE) else putString(PREF_THEME_MODE, mode)
+                            }
                         }
                     )
                 }
@@ -742,11 +783,21 @@ private const val PREF_THEME_MODE = "theme_mode"
 private const val THEME_LIGHT = "light"
 private const val THEME_DARK = "dark"
 
+/** A high-contrast selection mark that remains legible on every connector color. */
+@Composable private fun ConnectorSelectionMark(modifier: Modifier = Modifier) {
+    Box(
+        modifier.background(UiColor.surface.copy(alpha = .94f), CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(Icons.Default.Check, contentDescription = "Selected", tint = UiColor.onSurface, modifier = Modifier.fillMaxSize(.68f))
+    }
+}
+
 @Composable private fun FlowSnapApp(
     review: CaptureReview?,
     dismissReview: () -> Unit,
-    useDarkTheme: Boolean,
-    onThemeChange: (Boolean) -> Unit,
+    themeOverride: String?,
+    onThemeChange: (String?) -> Unit,
     vm: FlowViewModel = viewModel()
 ) {
     Box(Modifier.fillMaxSize().background(UiColor.surface)) {
@@ -759,7 +810,7 @@ private const val THEME_DARK = "dark"
             dismissReview()
         }) else if (settingsOpen) {
             AppSettingsScreen(
-                useDarkTheme = useDarkTheme,
+                themeOverride = themeOverride,
                 onThemeChange = onThemeChange,
                 close = { settingsOpen = false }
             )
@@ -840,8 +891,8 @@ private const val THEME_DARK = "dark"
 }
 
 @Composable private fun AppSettingsScreen(
-    useDarkTheme: Boolean,
-    onThemeChange: (Boolean) -> Unit,
+    themeOverride: String?,
+    onThemeChange: (String?) -> Unit,
     close: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -883,16 +934,22 @@ private const val THEME_DARK = "dark"
             SettingsSectionLabel("APPEARANCE")
             SettingsCard {
                 ThemeOption(
+                    title = "Use device theme",
+                    subtitle = "Switch automatically with your system setting",
+                    selected = themeOverride == null,
+                    onClick = { onThemeChange(null) }
+                )
+                ThemeOption(
                     title = "Light theme",
                     subtitle = "White surfaces and high-contrast text",
-                    selected = !useDarkTheme,
-                    onClick = { onThemeChange(false) }
+                    selected = themeOverride == THEME_LIGHT,
+                    onClick = { onThemeChange(THEME_LIGHT) }
                 )
                 ThemeOption(
                     title = "Dark theme",
                     subtitle = "Dark surfaces for low-light viewing",
-                    selected = useDarkTheme,
-                    onClick = { onThemeChange(true) }
+                    selected = themeOverride == THEME_DARK,
+                    onClick = { onThemeChange(THEME_DARK) }
                 )
             }
 
@@ -1000,7 +1057,7 @@ private const val THEME_DARK = "dark"
                                             .clickable { connectorColor = color },
                                         contentAlignment = Alignment.Center
                                     ) {
-                                        if (color == connectorColor) Icon(Icons.Default.Check, contentDescription = "Selected", tint = UiColor.onPrimary, modifier = Modifier.size(25.dp))
+                                        if (color == connectorColor) ConnectorSelectionMark(Modifier.size(25.dp))
                                     }
                                 }
                             }
@@ -1056,9 +1113,8 @@ private const val THEME_DARK = "dark"
 }
 
 @Composable private fun SettingsActionRow(title: String, trailing: @Composable () -> Unit, onClick: (() -> Unit)? = null) {
-    val interactionSource = remember { MutableInteractionSource() }
     val rowModifier = Modifier.fillMaxWidth().let { modifier ->
-        if (onClick == null) modifier else modifier.clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
+        if (onClick == null) modifier else modifier.clickable(onClick = onClick)
     }.padding(vertical = 4.dp)
     Row(rowModifier, verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
@@ -1422,11 +1478,12 @@ private fun ReviewCaptureCropOverlay(
     var draggingCorner by remember { mutableStateOf<Int?>(null) }
     val latestCrop by rememberUpdatedState(crop)
     val previewInset = 16.dp
-    // The crop overlay sits on a dark screen, so its controls use the normal
-    // surface foreground. `onPrimary` is reserved for the light Apply button.
-    val accent = UiColor.onSurface
+    // The crop overlay always has a dark workspace, independent of app theme.
+    val accent = UiColor.extra.onDarkSurface
     val cropDim = UiColor.scrim.copy(alpha = .58f)
-    val cropGrid = UiColor.onSurface.copy(alpha = .56f)
+    // The crop preview is always a dark workspace. Use its dedicated
+    // foreground rather than the surrounding app theme for the guides.
+    val cropGrid = UiColor.extra.onDarkSurface.copy(alpha = .68f)
     val cropHandleCenter = UiColor.background
     val overlayInteractionSource = remember { MutableInteractionSource() }
     val haptics = LocalHapticFeedback.current
@@ -1452,11 +1509,11 @@ private fun ReviewCaptureCropOverlay(
             ) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column {
-                        Text("Crop capture", color = UiColor.onSurface, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                        Text("Crop capture", color = UiColor.extra.onDarkSurface, fontSize = 21.sp, fontWeight = FontWeight.Bold)
                         Text("Drag a corner to choose what to keep", color = UiColor.extra.darkOnSurfaceMuted, fontSize = 12.sp)
                     }
                     IconButton(onClick = onCancel, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Filled.Close, contentDescription = "Close crop editor", tint = UiColor.onSurface)
+                        Icon(Icons.Filled.Close, contentDescription = "Close crop editor", tint = UiColor.extra.onDarkSurface)
                     }
                 }
                 Box(
@@ -1565,10 +1622,13 @@ private fun ReviewCaptureCropOverlay(
                         enabled = previousCrop != null,
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, UiColor.extra.darkOutline),
+                        border = BorderStroke(
+                            1.dp,
+                            UiColor.extra.onDarkSurface.copy(alpha = if (previousCrop != null) .68f else .28f)
+                        ),
                         colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = UiColor.onSurface,
-                            disabledContentColor = UiColor.onSurfaceVariant.copy(alpha = .72f),
+                            contentColor = UiColor.extra.onDarkSurface,
+                            disabledContentColor = UiColor.extra.onDarkSurface.copy(alpha = .42f),
                             disabledContainerColor = UiColor.transparent
                         )
                     ) { Text("Undo", fontWeight = FontWeight.SemiBold) }
@@ -1602,8 +1662,6 @@ private fun ReviewCaptureCropOverlay(
         return
     }
     val flow = currentFlow!!
-    var canvasMode by rememberSaveable(flow.id) { mutableStateOf(false) }
-    var canvasCommand by remember { mutableStateOf<CanvasCommand?>(null) }
     var pendingResult by remember { mutableStateOf<androidx.activity.result.ActivityResult?>(null) }
     var showTips by remember { mutableStateOf(false) }
     var captureLaunchInProgress by remember { mutableStateOf(false) }
@@ -1806,20 +1864,6 @@ private fun ReviewCaptureCropOverlay(
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             EditorDrawableCircle(R.drawable.ic_flow_settings, "Settings", onClick = { showDiagramSettings = true }, enabled = hasScreens)
-            if (hasScreens && !canvasMode) {
-                EditorDrawableCircle(
-                    iconRes = R.drawable.ic_flow_canvas,
-                    label = "Open canvas",
-                    onClick = { canvasMode = true }
-                )
-            }
-            if (hasScreens && canvasMode) {
-                EditorDrawableCircle(
-                    iconRes = R.drawable.ic_flow_cancel,
-                    label = "Close canvas",
-                    onClick = { canvasMode = false }
-                )
-            }
         }
         if (screens.isEmpty()) Text("Create a diagram with the + option below", Modifier.align(Alignment.Center), color = UiColor.primary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         else {
@@ -1827,11 +1871,6 @@ private fun ReviewCaptureCropOverlay(
                 screens = screens,
                 transitions = transitions,
                 flow = flow,
-                vm = vm,
-                canvasMode = canvasMode,
-                command = canvasCommand,
-                onCommandHandled = { canvasCommand = null },
-                onCommand = { canvasCommand = it },
                 onDeleteScreen = { screen -> vm.deleteScreen(screen) { android.widget.Toast.makeText(context, "Screenshot deleted", android.widget.Toast.LENGTH_SHORT).show() } },
                 onReplaceScreen = { screen ->
                     replacementTarget = screen
@@ -2354,15 +2393,19 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
         }
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Surface(
-            // Wrap content naturally so the actions follow the swatches instead
-            // of being pushed to the bottom of a near-full-screen dialog.
-            modifier = Modifier.fillMaxWidth(.90f).offset(y = (-36).dp),
+            // Wrap content on roomy screens, but cap the height so the
+            // settings remain scrollable rather than clipping on compact ones.
+            modifier = Modifier.fillMaxWidth(.90f).heightIn(max = 620.dp).offset(y = (-20).dp),
             color = UiColor.surface,
             shape = RoundedCornerShape(20.dp),
             border = BorderStroke(1.dp, UiColor.outlineVariant),
             shadowElevation = 12.dp
         ) {
-            Column(Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
+            Column(
+                Modifier
+                    .padding(horizontal = 18.dp, vertical = 16.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
                 Text("DIAGRAM SETTINGS", color = UiColor.onSurface, fontSize = 21.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
                 Box(Modifier.fillMaxWidth().height(1.dp).background(UiColor.outlineVariant))
@@ -2632,7 +2675,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
                         .clickable { onColorSelected(color) },
                     contentAlignment = Alignment.Center
                 ) {
-                    if (selected) Text("✓", color = UiColor.onPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    if (selected) ConnectorSelectionMark(Modifier.size(20.dp))
                 }
             }
         }
@@ -2642,6 +2685,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 @Composable private fun IncludedMark(included: Boolean, onClick: (() -> Unit)? = null) {
     val interactionSource = remember { MutableInteractionSource() }
     val hovered by interactionSource.collectIsHoveredAsState()
+    val pressed by interactionSource.collectIsPressedAsState()
     val borderColor by animateColorAsState(
         targetValue = if (hovered) UiColor.onSurfaceVariant else UiColor.outlineVariant,
         animationSpec = tween(durationMillis = 150),
@@ -2649,6 +2693,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     )
     val backgroundColor by animateColorAsState(
         targetValue = when {
+            pressed -> UiColor.primary.copy(alpha = .14f)
             included -> UiColor.surfaceVariant
             hovered -> UiColor.surfaceVariant
             else -> UiColor.surface
@@ -2662,7 +2707,11 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
             .border(1.dp, borderColor, RoundedCornerShape(8.dp))
             .hoverable(interactionSource)
             // The default indication draws the chunky gray block seen in the old UI.
-            .clickable(interactionSource = interactionSource, indication = null, enabled = onClick != null) { onClick?.invoke() },
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                enabled = onClick != null
+            ) { onClick?.invoke() },
         contentAlignment = Alignment.Center
     ) { if (included) Text("✓", color = UiColor.onSurface, fontSize = 20.sp, fontWeight = FontWeight.Bold) }
 }
@@ -3849,11 +3898,6 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
     screens: List<ScreenEntity>,
     transitions: List<TransitionEntity>,
     flow: FlowEntity,
-    vm: FlowViewModel,
-    canvasMode: Boolean,
-    command: CanvasCommand?,
-    onCommandHandled: () -> Unit,
-    onCommand: (CanvasCommand) -> Unit,
     onDeleteScreen: (ScreenEntity) -> Unit,
     onReplaceScreen: (ScreenEntity) -> Unit,
     onUpdatePointer: (ScreenEntity, Float, Float) -> Unit,
@@ -3862,6 +3906,8 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
 ) {
     val bitmaps = rememberScreenBitmaps(screens, maxDimension = 1600)
     var selectedScreen by remember { mutableStateOf<ScreenEntity?>(null) }
+    var previewZoom by remember(flow.id) { mutableStateOf(1f) }
+    var previewPan by remember(flow.id) { mutableStateOf(Offset.Zero) }
     val columns = flow.preferredColumns.coerceIn(1, screens.size.coerceAtLeast(1))
     val rows = (screens.size + columns - 1) / columns
     val previewHeight = (rows * 132).dp
@@ -3869,38 +3915,50 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
     Card(
         modifier = Modifier.fillMaxWidth().weight(1f),
         colors = CardDefaults.cardColors(containerColor = UiColor.surface),
+        border = BorderStroke(1.dp, UiColor.outlineVariant),
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
         Column(Modifier.padding(12.dp).fillMaxSize()) {
-            Box(Modifier.fillMaxWidth().weight(1f).clipToBounds()) {
-                if (canvasMode) {
-                    InteractiveFlowCanvas(
-                        state = FlowCanvasState(flow, screens, transitions, CanvasViewport(flow.canvasZoom, CanvasPoint(flow.canvasPanX, flow.canvasPanY))),
-                        bitmaps = bitmaps,
-                        vm = vm,
-                        onOpenScreen = {
-                            selectedScreen = it
-                            onLightboxVisibilityChange(true)
-                        },
-                        command = command,
-                        onCommandHandled = onCommandHandled,
-                        modifier = Modifier.fillMaxSize()
+            Box(
+                Modifier.fillMaxWidth().weight(1f).clipToBounds()
+                    .pointerInput(Unit) {
+                        detectTransformGestures { _, gesturePan, gestureZoom, _ ->
+                            previewZoom = (previewZoom * gestureZoom).coerceIn(.5f, 3f)
+                            previewPan += gesturePan
+                        }
+                    }
+            ) {
+                FlowDiagramCanvas(
+                    screens = screens,
+                    transitions = transitions,
+                    bitmaps = bitmaps,
+                    showMobileStencils = flow.showMobileStencils,
+                    connectorColor = Color(flow.connectorColor.toInt()),
+                    columnsOverride = columns,
+                    onScreenClick = {
+                        selectedScreen = it
+                        onLightboxVisibilityChange(true)
+                    },
+                    modifier = Modifier.fillMaxWidth().height(previewHeight).graphicsLayer(
+                        scaleX = previewZoom,
+                        scaleY = previewZoom,
+                        translationX = previewPan.x,
+                        translationY = previewPan.y
                     )
-                } else {
-                    Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                        FlowDiagramCanvas(
-                            screens = screens,
-                            transitions = transitions,
-                            bitmaps = bitmaps,
-                            showMobileStencils = flow.showMobileStencils,
-                            connectorColor = Color(flow.connectorColor.toInt()),
-                            columnsOverride = columns,
-                            onScreenClick = {
-                                selectedScreen = it
-                                onLightboxVisibilityChange(true)
-                            },
-                            modifier = Modifier.fillMaxWidth().height(previewHeight)
-                        )
+                )
+                Row(
+                    Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SmallCanvasControl(Icons.Default.Remove, "Zoom out") {
+                        previewZoom = (previewZoom / 1.25f).coerceAtLeast(.5f)
+                    }
+                    SmallCanvasControl(Icons.Default.Add, "Zoom in") {
+                        previewZoom = (previewZoom * 1.25f).coerceAtMost(3f)
+                    }
+                    SmallCanvasControl(Icons.Default.Apps, "Fit flow") {
+                        previewZoom = 1f
+                        previewPan = Offset.Zero
                     }
                 }
             }
@@ -3911,7 +3969,7 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
                 if (flow.showCreatedBy) add("Created by" to flow.createdBy)
                 if (flow.showAppVersion) add("App version" to "v1.0")
             }
-            if (!canvasMode && metadata.isNotEmpty()) {
+            if (metadata.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 Row(
                     Modifier.fillMaxWidth()
@@ -3923,7 +3981,7 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
                     metadata.forEach { (label, value) ->
                         Column(Modifier.weight(1f, fill = false)) {
                             Text(label, fontSize = 9.sp, color = UiColor.onSurfaceVariant)
-                            Text(value, fontSize = 12.sp, maxLines = 1)
+                            Text(value, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
@@ -3947,15 +4005,6 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
                 screens.getOrNull(currentIndex + direction)?.let { selectedScreen = it }
             }
         )
-    }
-    if (canvasMode) {
-        Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.Center) {
-            SmallCanvasControl(Icons.Default.Remove, "Zoom out") { onCommand(CanvasCommand.ZoomOut) }
-            Spacer(Modifier.width(8.dp))
-            SmallCanvasControl(Icons.Default.Add, "Zoom in") { onCommand(CanvasCommand.ZoomIn) }
-            Spacer(Modifier.width(8.dp))
-            SmallCanvasControl(Icons.Default.Apps, "Fit flow") { onCommand(CanvasCommand.Fit) }
-        }
     }
     }
 }
@@ -4005,8 +4054,9 @@ private fun fittedScreenshotRectInPadding(
     val context = androidx.compose.ui.platform.LocalContext.current
     val hostActivity = LocalActivity.current
     val viewerBarColor = UiColor.background
+    val lightboxStatusBar = Color.White
     val lightViewerTheme = viewerBarColor.luminance() > .5f
-    // Keep the actual system-bar surface in sync with the lightbox backdrop.
+    // The lightbox always uses a white status bar with dark system icons.
     // This matters on devices that reserve an opaque status-bar region rather
     // than allowing the dialog to draw behind it.
     androidx.compose.runtime.DisposableEffect(hostActivity, viewerBarColor) {
@@ -4016,9 +4066,9 @@ private fun fittedScreenshotRectInPadding(
         val previousLightNavigationIcons = controller.isAppearanceLightNavigationBars
         val previousStatusBarColor = hostWindow.statusBarColor
         val previousNavigationBarColor = hostWindow.navigationBarColor
-        hostWindow.statusBarColor = viewerBarColor.toArgb()
+        hostWindow.statusBarColor = lightboxStatusBar.toArgb()
         hostWindow.navigationBarColor = viewerBarColor.toArgb()
-        controller.isAppearanceLightStatusBars = lightViewerTheme
+        controller.isAppearanceLightStatusBars = true
         controller.isAppearanceLightNavigationBars = lightViewerTheme
         onDispose {
             hostWindow.statusBarColor = previousStatusBarColor
@@ -4085,10 +4135,11 @@ private fun fittedScreenshotRectInPadding(
                 window?.isNavigationBarContrastEnforced = false
             }
             window?.let {
-                it.statusBarColor = viewerBarColor.toArgb()
+                it.statusBarColor = lightboxStatusBar.toArgb()
                 it.navigationBarColor = viewerBarColor.toArgb()
-                WindowCompat.getInsetsController(it, dialogView).isAppearanceLightStatusBars = lightViewerTheme
-                WindowCompat.getInsetsController(it, dialogView).isAppearanceLightNavigationBars = lightViewerTheme
+                val dialogController = WindowCompat.getInsetsController(it, dialogView)
+                dialogController.isAppearanceLightStatusBars = true
+                dialogController.isAppearanceLightNavigationBars = lightViewerTheme
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 window?.setBackgroundBlurRadius(24)
@@ -4102,13 +4153,14 @@ private fun fittedScreenshotRectInPadding(
                 .clickable(interactionSource = backdropInteractionSource, indication = null, onClick = requestClose),
             contentAlignment = Alignment.Center
         ) {
-            // The preview owns the top system-bar area while it is open.
+            // This explicitly paints beneath the transparent, edge-to-edge
+            // system status bar so the underlying diagram never shows through.
             Box(
                 Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .windowInsetsTopHeight(WindowInsets.statusBars)
-                    .background(UiColor.background)
+                    .background(lightboxStatusBar)
             )
             Surface(
                 modifier = Modifier
@@ -4195,7 +4247,7 @@ private fun fittedScreenshotRectInPadding(
                             Spacer(Modifier.height(12.dp))
                             Text("Screenshot unavailable", color = UiColor.onSurface, fontSize = 16.sp, fontWeight = FontWeight.Medium)
                             Spacer(Modifier.height(4.dp))
-                            Text("The file was moved, deleted, or could not be read.", color = UiColor.extra.darkOnSurfaceMuted, fontSize = 13.sp, textAlign = TextAlign.Center)
+                            Text("The file was moved, deleted, or could not be read.", color = UiColor.onSurfaceVariant, fontSize = 13.sp, textAlign = TextAlign.Center)
                         }
                     }
                     if (editingPointer) {
@@ -4392,10 +4444,9 @@ private fun fittedScreenshotRectInPadding(
     tint: Color = UiColor.onSurface,
     onClick: () -> Unit
 ) {
-    val interactionSource = remember { MutableInteractionSource() }
     Column(
         modifier = Modifier.width(60.dp).height(64.dp)
-            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick),
+            .clickable(onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -4414,10 +4465,9 @@ private fun fittedScreenshotRectInPadding(
     onClick: () -> Unit,
     tint: Color = UiColor.onSurface
 ) {
-    val interactionSource = remember { MutableInteractionSource() }
     Column(
         modifier = Modifier.width(60.dp).height(64.dp)
-            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick),
+            .clickable(onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
