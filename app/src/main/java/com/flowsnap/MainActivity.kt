@@ -240,8 +240,8 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
         val start = CanvasPoint(source.left + source.width * transition.fromMarkerX, source.top + source.height * transition.fromMarkerY)
         Triple(start, nearestPointOnCanvasBounds(start, destination), transition)
     }
-    // Canvas connectors intentionally use FlowSnap's vivid green treatment.
-    val connector = Color(ConnectorPalette.Green.toInt())
+    // Connectors are flow semantics, so their green adapts to the active theme.
+    val connector = extra.marker
     val endpoints = deriveCanvasEndpoints(state.screens.map { it.id }.toSet(), state.transitions.map { CanvasEdge(it.fromScreenId, it.toScreenId) })
     state.screens.forEach { screen ->
         val bounds = nodeBounds.getValue(screen.id)
@@ -262,16 +262,8 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
             else -> null
         }
         label?.let {
-            val badgeColor = when (it) {
-                "START" -> colors.tertiary
-                "END" -> colors.error
-                else -> colors.primary
-            }
-            val badgeContentColor = when (it) {
-                "START" -> colors.onTertiary
-                "END" -> colors.onError
-                else -> colors.onPrimary
-            }
+            val badgeColor = colors.tertiary
+            val badgeContentColor = colors.onTertiary
             val badgeWidth = when (it) {
                 "START / END" -> 104f
                 "START" -> 64f
@@ -409,13 +401,20 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
     }
 }
 
-@Composable private fun SmallCanvasControl(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+@Composable private fun SmallCanvasDrawableControl(@androidx.annotation.DrawableRes iconRes: Int, label: String, onClick: () -> Unit) {
     Surface(
         shape = CircleShape,
-        color = UiColor.secondary,
+        color = UiColor.primaryContainer,
         modifier = Modifier.size(40.dp).clickable(onClick = onClick)
     ) {
-        Box(contentAlignment = Alignment.Center) { Icon(icon, label, tint = UiColor.onSecondary, modifier = Modifier.size(21.dp)) }
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                painter = painterResource(iconRes),
+                contentDescription = label,
+                tint = UiColor.primary,
+                modifier = Modifier.size(21.dp)
+            )
+        }
     }
 }
 
@@ -804,6 +803,31 @@ private const val THEME_DARK = "dark"
         var selectedFlowId by rememberSaveable { mutableStateOf<String?>(null) }
         var settingsOpen by rememberSaveable { mutableStateOf(false) }
         var lightboxOpen by remember { mutableStateOf(false) }
+        val workspaceOpen = selectedFlowId != null && review == null && !settingsOpen
+        val hostActivity = LocalActivity.current
+        val appBackground = UiColor.background
+        val workspaceStatusBar = UiColor.extra.statusBar
+        val workspaceBackground = UiColor.extra.canvasBackground
+        val darkAppTheme = appBackground.luminance() <= .5f
+        // The diagram workspace is intentionally charcoal in either app
+        // theme, including the edge-to-edge system-bar areas.
+        SideEffect {
+            hostActivity?.window?.let { window ->
+                val controller = WindowCompat.getInsetsController(window, window.decorView)
+                if (workspaceOpen && darkAppTheme) {
+                    window.statusBarColor = workspaceStatusBar.toArgb()
+                    window.navigationBarColor = workspaceBackground.toArgb()
+                    controller.isAppearanceLightStatusBars = false
+                    controller.isAppearanceLightNavigationBars = false
+                } else {
+                    window.statusBarColor = appBackground.toArgb()
+                    window.navigationBarColor = appBackground.toArgb()
+                    val useLightIcons = appBackground.luminance() <= .5f
+                    controller.isAppearanceLightStatusBars = !useLightIcons
+                    controller.isAppearanceLightNavigationBars = !useLightIcons
+                }
+            }
+        }
         androidx.compose.runtime.LaunchedEffect(review?.path) { vm.cleanupOrphanedCaptures(review?.path) }
         if (review != null) CaptureReviewScreen(review, vm, dismissReview, onFinish = { savedFlow ->
             if (savedFlow != null) selectedFlowId = savedFlow.id
@@ -826,16 +850,13 @@ private const val THEME_DARK = "dark"
                 onLightboxVisibilityChange = { lightboxOpen = it }
             )
         }
-        // Keep Android's transparent edge-to-edge status area white on the
-        // normal app screens. The lightbox overrides this in its own window.
+        // Paint the edge-to-edge inset to match its current destination.
         Box(
             Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .windowInsetsTopHeight(WindowInsets.statusBars)
-                // The dialog dim layer makes this render as the requested
-                // near-black #1A1A1A while a screenshot preview is open.
-                .background(if (lightboxOpen) UiColor.extra.darkOutline else UiColor.surface)
+                .background(if ((workspaceOpen && darkAppTheme) || lightboxOpen) UiColor.extra.statusBar else UiColor.surface)
                 .zIndex(10f)
         )
     }
@@ -1018,7 +1039,7 @@ private const val THEME_DARK = "dark"
                 modifier = Modifier.fillMaxWidth().height(52.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = primaryBlue)
-            ) { Text("SAVE CHANGES", fontWeight = FontWeight.Bold) }
+            ) { Text("Save changes", fontWeight = FontWeight.Bold) }
             Spacer(Modifier.height(12.dp))
         }
     }
@@ -1030,7 +1051,7 @@ private const val THEME_DARK = "dark"
             Surface(
                 modifier = Modifier.fillMaxWidth(.86f),
                 color = UiColor.surface,
-                shape = RoundedCornerShape(28.dp),
+                shape = RoundedCornerShape(20.dp),
                 shadowElevation = 18.dp
             ) {
                 Column(Modifier.padding(horizontal = 24.dp, vertical = 22.dp)) {
@@ -1070,7 +1091,7 @@ private const val THEME_DARK = "dark"
                         modifier = Modifier.fillMaxWidth().height(48.dp),
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = primaryBlue)
-                    ) { Text("DONE", fontWeight = FontWeight.Bold) }
+                    ) { Text("Done", fontWeight = FontWeight.Bold) }
                 }
             }
         }
@@ -1082,7 +1103,7 @@ private const val THEME_DARK = "dark"
 }
 
 @Composable private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
-    Surface(color = UiColor.surface, shape = RoundedCornerShape(18.dp), shadowElevation = 2.dp) {
+    Surface(color = UiColor.surface, shape = RoundedCornerShape(14.dp), shadowElevation = 2.dp) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), content = content)
     }
 }
@@ -1107,7 +1128,7 @@ private const val THEME_DARK = "dark"
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(title, color = UiColor.onSurface, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text(subtitle, color = UiColor.onSurfaceVariant, fontSize = 12.sp)
+            Text(subtitle, color = UiColor.onSurfaceVariant, fontSize = 13.sp)
         }
     }
 }
@@ -1137,7 +1158,7 @@ private const val THEME_DARK = "dark"
         Column(Modifier.weight(1f)) {
             Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = UiColor.onSurface)
             Spacer(Modifier.height(3.dp))
-            Text(subtitle, fontSize = 12.sp, color = UiColor.onSurfaceVariant)
+            Text(subtitle, fontSize = 13.sp, color = UiColor.onSurfaceVariant)
         }
         Text("›", fontSize = 26.sp, color = UiColor.onSurfaceVariant)
     }
@@ -1146,10 +1167,7 @@ private const val THEME_DARK = "dark"
 @Composable private fun CreateFlowTile(modifier: Modifier, onClick: () -> Unit) = Card(
     onClick = onClick,
     modifier = modifier,
-    shape = RoundedCornerShape(20.dp),
-    // Match the preview card: a subtle neutral edge softens the elevated
-    // surface without reintroducing the previous violet outline.
-    border = BorderStroke(1.dp, UiColor.outlineVariant),
+    shape = RoundedCornerShape(14.dp),
     elevation = CardDefaults.cardElevation(defaultElevation = 5.dp),
     colors = CardDefaults.cardColors(containerColor = UiColor.surface)
 ) {
@@ -1179,30 +1197,28 @@ private const val THEME_DARK = "dark"
     Card(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth().aspectRatio(.72f),
-        shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, UiColor.outlineVariant),
+        shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = UiColor.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 5.dp)
     ) {
         Column(Modifier.padding(12.dp).fillMaxSize()) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("FLOW PREVIEW", color = UiColor.onSurfaceVariant, fontSize = 8.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
+                Text("Flow preview", color = UiColor.onSurfaceVariant, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.2.sp)
                 Spacer(Modifier.weight(1f))
                 Surface(color = UiColor.primaryContainer, shape = RoundedCornerShape(20.dp)) {
-                    Text("${screens.size} ${if (screens.size == 1) "screen" else "screens"}", Modifier.padding(horizontal = 7.dp, vertical = 3.dp), color = UiColor.primary, fontSize = 8.sp, fontWeight = FontWeight.SemiBold)
+                    Text("${screens.size} ${if (screens.size == 1) "screen" else "screens"}", Modifier.padding(horizontal = 8.dp, vertical = 4.dp), color = UiColor.primary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
             Spacer(Modifier.height(9.dp))
             Box(
                 Modifier.weight(1f).fillMaxWidth()
                     .background(UiColor.surfaceVariant, RoundedCornerShape(12.dp))
-                    .border(1.dp, UiColor.outlineVariant, RoundedCornerShape(12.dp))
                     .padding(7.dp)
             ) {
                 if (previewScreens.isNotEmpty()) {
                     GalleryFlowPreview(previewScreens, bitmaps)
                 } else {
-                    Text("Your captured flow\nwill appear here", Modifier.align(Alignment.Center), color = UiColor.onSurfaceVariant, fontSize = 11.sp, textAlign = TextAlign.Center, lineHeight = 15.sp)
+                    Text("Your captured flow\nwill appear here", Modifier.align(Alignment.Center), color = UiColor.onSurfaceVariant, fontSize = 13.sp, textAlign = TextAlign.Center, lineHeight = 18.sp)
                 }
             }
             Text(
@@ -1215,7 +1231,7 @@ private const val THEME_DARK = "dark"
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
-            Text("Updated ${java.text.SimpleDateFormat("MMM d", java.util.Locale.getDefault()).format(java.util.Date(flow.updatedAt))}", Modifier.padding(top = 0.dp), color = UiColor.onSurfaceVariant, fontSize = 10.sp)
+            Text("Updated ${java.text.SimpleDateFormat("MMM d", java.util.Locale.getDefault()).format(java.util.Date(flow.updatedAt))}", Modifier.padding(top = 0.dp), color = UiColor.onSurfaceVariant, fontSize = 12.sp)
         }
     }
 }
@@ -1329,8 +1345,8 @@ private const val THEME_DARK = "dark"
     // Keep the review actions above Android's gesture/navigation area.
     val primaryBlue = UiColor.primary
     val pageBackground = UiColor.background
-    val markerHalo = UiColor.onPrimary
-    val markerInk = UiColor.onSurfaceVariant
+    val markerHalo = UiColor.extra.onDarkSurface
+    val markerInk = UiColor.extra.marker
     Box(Modifier.fillMaxSize()) {
         Column(
             Modifier.fillMaxSize().background(pageBackground).windowInsetsPadding(WindowInsets.systemBars),
@@ -1347,14 +1363,14 @@ private const val THEME_DARK = "dark"
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("Review capture", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = UiColor.onSurface)
-                    Text("Drag the marker to set the next step", fontSize = 12.sp, color = UiColor.onSurfaceVariant)
+                    Text("Review capture", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = UiColor.onSurface)
+                    Text("Drag the marker to set the next step", fontSize = 14.sp, color = UiColor.onSurfaceVariant)
                 }
                 OutlinedButton(
                     onClick = { showCropEditor = true }, enabled = bitmap != null,
                     shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, primaryBlue),
                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
-                ) { Text("CROP", color = primaryBlue, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                ) { Text("Crop", color = primaryBlue, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
             }
         }
         Box(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 20.dp, vertical = 18.dp), contentAlignment = Alignment.Center) {
@@ -1363,7 +1379,7 @@ private const val THEME_DARK = "dark"
                 // review canvas; only its surrounding presentation has changed.
                 modifier = Modifier.fillMaxSize(),
                 color = UiColor.surface,
-                shape = RoundedCornerShape(28.dp),
+                shape = RoundedCornerShape(20.dp),
                 shadowElevation = 10.dp
             ) {
                 Column(Modifier.fillMaxSize()) {
@@ -1397,7 +1413,7 @@ private const val THEME_DARK = "dark"
         Surface(
             modifier = Modifier.fillMaxWidth(),
             color = UiColor.surface,
-            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
             shadowElevation = 12.dp
         ) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp)) {
@@ -1408,11 +1424,11 @@ private const val THEME_DARK = "dark"
                 ) {
                 OutlinedButton(
                     onClick = { ScreenshotStorage.delete(context, review.path); returnToCapturedApp() },
-                    modifier = Modifier.weight(.84f).height(54.dp),
+                    modifier = Modifier.weight(.75f).height(54.dp),
                     shape = RoundedCornerShape(16.dp),
                     border = BorderStroke(1.5.dp, UiColor.error),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = UiColor.error)
-                ) { Text("DISCARD", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
+                ) { Text("Discard", fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                 Button(
                     onClick = {
                         vm.keepCapture(reviewedCapture) { saved ->
@@ -1420,10 +1436,10 @@ private const val THEME_DARK = "dark"
                             else android.widget.Toast.makeText(context, "This diagram was deleted; the capture was discarded", android.widget.Toast.LENGTH_LONG).show()
                         }
                     },
-                    modifier = Modifier.weight(1f).height(54.dp),
+                    modifier = Modifier.weight(1.25f).height(54.dp),
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = UiColor.onPrimary)
-                ) { Text("KEEP + NEXT", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
+                ) { Text("Keep + next", fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                 Button(
                     onClick = {
                         context.startService(Intent(context, CaptureService::class.java).setAction(CaptureService.ACTION_STOP))
@@ -1432,7 +1448,7 @@ private const val THEME_DARK = "dark"
                     modifier = Modifier.weight(1f).height(54.dp),
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = UiColor.secondary, contentColor = UiColor.onPrimary)
-                ) { Text("FINISH", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
+                ) { Text("Finish", fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                 }
             }
         }
@@ -1478,13 +1494,18 @@ private fun ReviewCaptureCropOverlay(
     var draggingCorner by remember { mutableStateOf<Int?>(null) }
     val latestCrop by rememberUpdatedState(crop)
     val previewInset = 16.dp
-    // The crop overlay always has a dark workspace, independent of app theme.
-    val accent = UiColor.extra.onDarkSurface
+    val lightTheme = UiColor.background.luminance() > .5f
+    val cropPage = if (lightTheme) UiColor.background else UiColor.extra.statusBar
+    val cropSurface = if (lightTheme) UiColor.surface else UiColor.extra.darkSurfaceVariant
+    val cropOutline = if (lightTheme) UiColor.outlineVariant else UiColor.extra.darkOutline
+    val cropOnSurface = if (lightTheme) UiColor.onSurface else UiColor.extra.onDarkSurface
+    val cropMuted = if (lightTheme) UiColor.onSurfaceVariant else UiColor.extra.darkOnSurfaceMuted
+    val accent = if (lightTheme) UiColor.primary else UiColor.extra.onDarkSurface
     val cropDim = UiColor.scrim.copy(alpha = .58f)
-    // The crop preview is always a dark workspace. Use its dedicated
-    // foreground rather than the surrounding app theme for the guides.
-    val cropGrid = UiColor.extra.onDarkSurface.copy(alpha = .68f)
-    val cropHandleCenter = UiColor.background
+    val cropGrid = cropOnSurface.copy(alpha = .60f)
+    val cropHandleCenter = cropPage
+    val applyContainer = if (lightTheme) UiColor.primary else UiColor.extra.editorControl
+    val applyContent = if (lightTheme) UiColor.onPrimary else UiColor.extra.darkSurfaceVariant
     val overlayInteractionSource = remember { MutableInteractionSource() }
     val haptics = LocalHapticFeedback.current
     var edgeHapticMask by remember { mutableIntStateOf(0) }
@@ -1492,16 +1513,15 @@ private fun ReviewCaptureCropOverlay(
     Box(
             Modifier
                 .fillMaxSize()
-                .background(UiColor.extra.statusBar)
+                .background(cropPage)
                 .clickable(interactionSource = overlayInteractionSource, indication = null, onClick = {}),
             contentAlignment = Alignment.Center
         ) {
             Column(
                 Modifier
                     .fillMaxSize()
-                    // Reserve the system-bar area even while the crop editor
-                    // hides the status bar. A transient swipe-to-reveal bar
-                    // then occupies empty dark space instead of our header.
+                    // Reserve the system-bar area while the crop editor owns
+                    // the full-screen layout.
                     .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
                     .windowInsetsPadding(WindowInsets.navigationBars)
                     .padding(horizontal = 20.dp, vertical = 18.dp),
@@ -1509,18 +1529,18 @@ private fun ReviewCaptureCropOverlay(
             ) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column {
-                        Text("Crop capture", color = UiColor.extra.onDarkSurface, fontSize = 21.sp, fontWeight = FontWeight.Bold)
-                        Text("Drag a corner to choose what to keep", color = UiColor.extra.darkOnSurfaceMuted, fontSize = 12.sp)
+                        Text("Crop capture", color = cropOnSurface, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                        Text("Drag a corner to choose what to keep", color = cropMuted, fontSize = 14.sp)
                     }
                     IconButton(onClick = onCancel, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Filled.Close, contentDescription = "Close crop editor", tint = UiColor.extra.onDarkSurface)
+                        Icon(Icons.Filled.Close, contentDescription = "Close crop editor", tint = cropOnSurface)
                     }
                 }
                 Box(
                     Modifier.fillMaxWidth().weight(1f)
                         .clip(RoundedCornerShape(20.dp))
-                        .background(UiColor.extra.darkSurfaceVariant)
-                        .border(1.dp, UiColor.extra.darkOutline, RoundedCornerShape(20.dp))
+                        .background(cropSurface)
+                        .border(1.dp, cropOutline, RoundedCornerShape(20.dp))
                 ) {
                     androidx.compose.foundation.Image(
                         bitmap,
@@ -1624,11 +1644,11 @@ private fun ReviewCaptureCropOverlay(
                         shape = RoundedCornerShape(14.dp),
                         border = BorderStroke(
                             1.dp,
-                            UiColor.extra.onDarkSurface.copy(alpha = if (previousCrop != null) .68f else .28f)
+                            cropOnSurface.copy(alpha = if (previousCrop != null) .68f else .28f)
                         ),
                         colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = UiColor.extra.onDarkSurface,
-                            disabledContentColor = UiColor.extra.onDarkSurface.copy(alpha = .42f),
+                            contentColor = cropOnSurface,
+                            disabledContentColor = cropOnSurface.copy(alpha = .42f),
                             disabledContainerColor = UiColor.transparent
                         )
                     ) { Text("Undo", fontWeight = FontWeight.SemiBold) }
@@ -1636,7 +1656,10 @@ private fun ReviewCaptureCropOverlay(
                         onClick = { onSave(crop.valid()) },
                         modifier = Modifier.weight(1.35f),
                         shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = UiColor.primary, contentColor = UiColor.onPrimary)
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = applyContainer,
+                            contentColor = applyContent
+                        )
                     ) { Text("Apply crop", fontWeight = FontWeight.Bold) }
                 }
             }
@@ -1968,9 +1991,17 @@ private fun ReviewCaptureCropOverlay(
             containerColor = UiColor.surface,
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("⚠", color = UiColor.extra.warning, fontSize = 32.sp)
+                    Surface(
+                        modifier = Modifier.size(42.dp),
+                        shape = CircleShape,
+                        color = UiColor.extra.destructiveContainer
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("!", color = UiColor.error, fontSize = 23.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
                     Spacer(Modifier.width(12.dp))
-                    Text("Deleting diagram", color = UiColor.secondary, fontWeight = FontWeight.Medium)
+                    Text("Delete diagram?", color = UiColor.onSurface, fontWeight = FontWeight.SemiBold)
                 }
             },
             text = {
@@ -1981,16 +2012,18 @@ private fun ReviewCaptureCropOverlay(
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirmation = false }) {
-                    Text("CANCEL", color = UiColor.secondary)
+                    Text("Cancel", color = UiColor.onSurfaceVariant)
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
+                Button(onClick = {
                     vm.deleteFlow(flow) {
                         showDeleteConfirmation = false
                         goBack()
                     }
-                }) { Text("OK", color = UiColor.secondary) }
+                }, shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = UiColor.error, contentColor = UiColor.onError)) {
+                    Text("Delete", fontWeight = FontWeight.Bold)
+                }
             }
         )
     }
@@ -2004,8 +2037,7 @@ private fun ReviewCaptureCropOverlay(
         Surface(
             modifier = Modifier.fillMaxWidth(.88f),
             color = UiColor.surface,
-            shape = RoundedCornerShape(28.dp),
-            border = BorderStroke(1.dp, UiColor.outlineVariant),
+            shape = RoundedCornerShape(20.dp),
             shadowElevation = 16.dp
         ) {
             Column(Modifier.padding(22.dp)) {
@@ -2051,7 +2083,7 @@ private fun ReviewCaptureCropOverlay(
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = UiColor.onPrimary)
-                ) { Text("GOT IT", fontWeight = FontWeight.Bold, letterSpacing = .6.sp) }
+                ) { Text("Got it", fontWeight = FontWeight.Bold, letterSpacing = .2.sp) }
             }
         }
     }
@@ -2064,8 +2096,7 @@ private fun ShareToDriveGuideDialog(onDismiss: () -> Unit, onContinue: () -> Uni
         Surface(
             modifier = Modifier.fillMaxWidth(.88f),
             color = UiColor.surface,
-            shape = RoundedCornerShape(28.dp),
-            border = BorderStroke(1.dp, UiColor.outlineVariant),
+            shape = RoundedCornerShape(20.dp),
             shadowElevation = 18.dp
         ) {
             Column(Modifier.padding(26.dp)) {
@@ -2109,10 +2140,10 @@ private fun ShareToDriveGuideDialog(onDismiss: () -> Unit, onContinue: () -> Uni
                     colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = UiColor.onPrimary),
                     contentPadding = PaddingValues(vertical = 14.dp)
                 ) {
-                    Text("CONTINUE TO SHARE", fontWeight = FontWeight.Bold)
+                    Text("Continue to share", fontWeight = FontWeight.Bold)
                 }
                 TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.CenterHorizontally)) {
-                    Text("NOT NOW", color = UiColor.onSurfaceVariant, fontWeight = FontWeight.SemiBold)
+                    Text("Not now", color = UiColor.onSurfaceVariant, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -2193,8 +2224,7 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
         Surface(
             modifier = Modifier.fillMaxWidth(.88f),
             color = UiColor.surface,
-            shape = RoundedCornerShape(28.dp),
-            border = BorderStroke(1.dp, UiColor.outlineVariant),
+            shape = RoundedCornerShape(20.dp),
             shadowElevation = 18.dp
         ) {
             Column(Modifier.padding(26.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -2271,13 +2301,12 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
         Surface(
             modifier = Modifier.fillMaxWidth(.88f),
             color = UiColor.surface,
-            shape = RoundedCornerShape(28.dp),
-            border = BorderStroke(1.dp, UiColor.outlineVariant),
+            shape = RoundedCornerShape(20.dp),
             shadowElevation = 14.dp
         ) {
             Column(Modifier.padding(horizontal = 24.dp, vertical = 26.dp)) {
                 Text(
-                    "EXPORT DIAGRAM",
+                    "Export diagram",
                     color = UiColor.onSurface,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
@@ -2310,7 +2339,7 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
                                 Text(
                                     description,
                                     color = UiColor.onSurfaceVariant,
-                                    fontSize = 11.sp,
+                        fontSize = 12.sp,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
@@ -2319,7 +2348,7 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
                     }
                 }
                 Row(Modifier.fillMaxWidth().padding(top = 22.dp), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = onDismiss) { Text("CANCEL", color = primaryBlue, fontWeight = FontWeight.SemiBold) }
+                    TextButton(onClick = onDismiss) { Text("Cancel", color = primaryBlue, fontWeight = FontWeight.SemiBold) }
                     Spacer(Modifier.width(14.dp))
                     Button(
                         onClick = {
@@ -2334,7 +2363,7 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
                         colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = UiColor.onPrimary),
                         shape = RoundedCornerShape(14.dp),
                         contentPadding = PaddingValues(horizontal = 22.dp, vertical = 12.dp)
-                    ) { Text("SAVE AS", fontWeight = FontWeight.Bold) }
+                    ) { Text("Save as", fontWeight = FontWeight.Bold) }
                 }
             }
         }
@@ -2398,7 +2427,6 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
             modifier = Modifier.fillMaxWidth(.90f).heightIn(max = 620.dp).offset(y = (-20).dp),
             color = UiColor.surface,
             shape = RoundedCornerShape(20.dp),
-            border = BorderStroke(1.dp, UiColor.outlineVariant),
             shadowElevation = 12.dp
         ) {
             Column(
@@ -2406,16 +2434,14 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
                     .padding(horizontal = 18.dp, vertical = 16.dp)
                     .verticalScroll(rememberScrollState())
             ) {
-                Text("DIAGRAM SETTINGS", color = UiColor.onSurface, fontSize = 21.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(6.dp))
-                Box(Modifier.fillMaxWidth().height(1.dp).background(UiColor.outlineVariant))
+                Text("Diagram settings", color = UiColor.onSurface, fontSize = 21.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(10.dp))
                 Row(
                     Modifier.fillMaxWidth().background(UiColor.surfaceVariant, RoundedCornerShape(12.dp)).padding(3.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    DiagramSettingsTab("LABELS", selected = !appearancePage, onClick = { appearancePage = false }, modifier = Modifier.weight(1f))
-                    DiagramSettingsTab("LOOK & FEEL", selected = appearancePage, onClick = { appearancePage = true }, modifier = Modifier.weight(1f))
+                    DiagramSettingsTab("Labels", selected = !appearancePage, onClick = { appearancePage = false }, modifier = Modifier.weight(1f))
+                    DiagramSettingsTab("Look & feel", selected = appearancePage, onClick = { appearancePage = true }, modifier = Modifier.weight(1f))
                 }
                 Spacer(Modifier.height(12.dp))
                 AnimatedContent(
@@ -2462,10 +2488,10 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
                 Spacer(Modifier.height(20.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = onDismiss, modifier = Modifier.padding(end = 14.dp)) {
-                        Text("CANCEL", color = UiColor.onSurfaceVariant, fontWeight = FontWeight.SemiBold)
+                        Text("Cancel", color = UiColor.onSurfaceVariant, fontWeight = FontWeight.SemiBold)
                     }
                     TextButton(onClick = { onSave(title, version, createdBy, showTitle, showVersion, showCreatedAt, showCreatedBy, showAppVersion, showMobileStencils, connectorColor, preferredColumns) }) {
-                        Text("SAVE", color = UiColor.primary, fontWeight = FontWeight.Bold)
+                        Text("Save", color = UiColor.primary, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -2496,7 +2522,6 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     Column(
         Modifier.fillMaxWidth()
             .background(UiColor.surfaceVariant, RoundedCornerShape(14.dp))
-            .border(1.dp, UiColor.outlineVariant, RoundedCornerShape(14.dp))
             .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
         AppearanceToggle(showMobileStencils, onShowMobileStencilsChange)
@@ -2521,8 +2546,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     ) {
         Box(
             Modifier.size(36.dp)
-                .background(UiColor.surface, RoundedCornerShape(10.dp))
-                .border(1.dp, UiColor.outlineVariant, RoundedCornerShape(10.dp)),
+                .background(UiColor.surface, RoundedCornerShape(12.dp)),
             contentAlignment = Alignment.Center
         ) {
             Icon(
@@ -2548,7 +2572,6 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 @Composable private fun DiagramColumnStepButton(label: String, enabled: Boolean, onClick: () -> Unit) {
     Box(
         Modifier.size(30.dp).background(if (enabled) UiColor.surfaceVariant else UiColor.transparent, CircleShape)
-            .border(1.dp, UiColor.outlineVariant, CircleShape)
             .clip(CircleShape).clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
@@ -2558,12 +2581,12 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 
 @Composable private fun EditableDiagramSetting(label: String, value: String, onValueChange: (String) -> Unit, included: Boolean, toggleIncluded: () -> Unit) {
     Column(Modifier.fillMaxWidth()) {
-        Text(label, fontSize = 12.sp, color = UiColor.onSurfaceVariant, fontWeight = FontWeight.Medium)
+        Text(label, fontSize = 13.sp, color = UiColor.onSurfaceVariant, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(3.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.weight(1f).height(44.dp)
-                    .border(1.dp, UiColor.outlineVariant, RoundedCornerShape(10.dp))
+                    .background(UiColor.surfaceVariant, RoundedCornerShape(12.dp))
                     .padding(horizontal = 16.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
@@ -2596,12 +2619,12 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 
 @Composable private fun ReadOnlyDiagramSetting(label: String, value: String, included: Boolean, toggleIncluded: () -> Unit) {
     Column(Modifier.fillMaxWidth()) {
-        Text(label, fontSize = 12.sp, color = UiColor.onSurfaceVariant, fontWeight = FontWeight.Medium)
+        Text(label, fontSize = 13.sp, color = UiColor.onSurfaceVariant, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(3.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.weight(1f).height(44.dp)
-                    .border(1.dp, UiColor.outlineVariant, RoundedCornerShape(10.dp))
+                    .background(UiColor.surfaceVariant, RoundedCornerShape(12.dp))
                     .padding(horizontal = 16.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
@@ -2619,8 +2642,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(
             Modifier.size(36.dp)
-                .background(UiColor.surface, RoundedCornerShape(10.dp))
-                .border(1.dp, UiColor.outlineVariant, RoundedCornerShape(10.dp)),
+                .background(UiColor.surface, RoundedCornerShape(12.dp)),
             contentAlignment = Alignment.Center
         ) {
             Icon(
@@ -2659,7 +2681,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
             Spacer(Modifier.width(10.dp))
             Column {
                 Text("Color of arrows", color = UiColor.onSurface, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                Text("#%06X".format(selectedColor and 0xFFFFFF), color = UiColor.onSurfaceVariant, fontSize = 11.sp)
+                Text("#%06X".format(selectedColor and 0xFFFFFF), color = UiColor.onSurfaceVariant, fontSize = 12.sp)
             }
         }
         Spacer(Modifier.height(10.dp))
@@ -2719,8 +2741,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
 @Composable private fun DragTapIllustration(primaryBlue: Color) = Surface(
     modifier = Modifier.fillMaxWidth(),
     color = UiColor.secondaryContainer,
-    shape = RoundedCornerShape(18.dp),
-    border = BorderStroke(1.dp, UiColor.outlineVariant)
+    shape = RoundedCornerShape(14.dp)
 ) {
     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         CaptureTipStep(
@@ -2752,16 +2773,17 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(title, color = UiColor.onSurface, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text(detail, color = UiColor.onSurfaceVariant, fontSize = 12.sp, lineHeight = 16.sp)
+            Text(detail, color = UiColor.onSurfaceVariant, fontSize = 13.sp, lineHeight = 18.sp)
         }
     }
 }
 
 @Composable private fun Modifier.diagramGrid(): Modifier {
+    val workspace = UiColor.extra
     val surfaceVariant = UiColor.surfaceVariant
-    val canvasBackground = UiColor.extra.canvasBackground
-    val minorGrid = UiColor.extra.canvasMinorGrid.copy(alpha = .72f)
-    val majorGrid = UiColor.extra.canvasMajorGrid.copy(alpha = .70f)
+    val canvasBackground = workspace.canvasBackground
+    val minorGrid = workspace.canvasMinorGrid
+    val majorGrid = workspace.canvasMajorGrid
     return this.drawBehind {
     // Fine graph-paper grid: it gives the editor structure without competing
     // with the screenshots. Every fourth line is a gentle visual guide.
@@ -3871,24 +3893,32 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
 }
 
 @Composable private fun EditorCircle(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, large: Boolean = false, enabled: Boolean = true) {
-    val size = if (large) 74.dp else 48.dp
-    val borderTint = if (enabled) UiColor.extra.editorControl else UiColor.extra.disabled
-    val iconTint = if (enabled) UiColor.extra.editorIcon else UiColor.extra.disabled
-    Surface(modifier = modifier.size(size), shape = CircleShape, color = UiColor.transparent, border = BorderStroke(if (large) 3.dp else 2.dp, borderTint)) { Box(Modifier.fillMaxSize().clip(CircleShape).clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) { Icon(icon, label, tint = iconTint, modifier = Modifier.size(if (large) 42.dp else 27.dp)) } }
+    val size = if (large) 60.dp else 44.dp
+    val iconTint = if (enabled) UiColor.primary else UiColor.extra.disabled
+    Surface(
+        modifier = modifier.size(size),
+        shape = CircleShape,
+        color = if (enabled) UiColor.primaryContainer else UiColor.surfaceVariant,
+        shadowElevation = if (enabled) 5.dp else 0.dp
+    ) { Box(Modifier.fillMaxSize().clip(CircleShape).clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) { Icon(icon, label, tint = iconTint, modifier = Modifier.size(if (large) 32.dp else 23.dp)) } }
 }
 
 /** Renders the supplied Android Studio vector assets in the existing editor control style. */
 @Composable private fun EditorDrawableCircle(iconRes: Int, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, large: Boolean = false, enabled: Boolean = true, iconTint: Color? = null) {
-    val size = if (large) 74.dp else 48.dp
-    val borderTint = if (enabled) UiColor.extra.editorControl else UiColor.extra.disabled
-    val defaultIconTint = if (enabled) UiColor.extra.editorIcon else UiColor.extra.disabled
-    Surface(modifier = modifier.size(size), shape = CircleShape, color = UiColor.transparent, border = BorderStroke(if (large) 3.dp else 2.dp, borderTint)) {
+    val size = if (large) 60.dp else 44.dp
+    val defaultIconTint = if (enabled) UiColor.primary else UiColor.extra.disabled
+    Surface(
+        modifier = modifier.size(size),
+        shape = CircleShape,
+        color = if (enabled) UiColor.primaryContainer else UiColor.surfaceVariant,
+        shadowElevation = if (enabled) 5.dp else 0.dp
+    ) {
         Box(Modifier.fillMaxSize().clip(CircleShape).clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) {
             Icon(
                 painterResource(iconRes),
                 label,
                 tint = if (enabled) iconTint ?: defaultIconTint else defaultIconTint,
-                modifier = Modifier.size(if (large) 42.dp else 27.dp)
+                modifier = Modifier.size(if (large) 32.dp else 23.dp)
             )
         }
     }
@@ -3915,7 +3945,6 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
     Card(
         modifier = Modifier.fillMaxWidth().weight(1f),
         colors = CardDefaults.cardColors(containerColor = UiColor.surface),
-        border = BorderStroke(1.dp, UiColor.outlineVariant),
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
         Column(Modifier.padding(12.dp).fillMaxSize()) {
@@ -3933,7 +3962,7 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
                     transitions = transitions,
                     bitmaps = bitmaps,
                     showMobileStencils = flow.showMobileStencils,
-                    connectorColor = Color(flow.connectorColor.toInt()),
+                    connectorColor = themedFlowConnectorColor(flow.connectorColor),
                     columnsOverride = columns,
                     onScreenClick = {
                         selectedScreen = it
@@ -3950,13 +3979,13 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
                     Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    SmallCanvasControl(Icons.Default.Remove, "Zoom out") {
+                    SmallCanvasDrawableControl(R.drawable.ic_flow_zoom_out, "Zoom out") {
                         previewZoom = (previewZoom / 1.25f).coerceAtLeast(.5f)
                     }
-                    SmallCanvasControl(Icons.Default.Add, "Zoom in") {
+                    SmallCanvasDrawableControl(R.drawable.ic_flow_zoom_in, "Zoom in") {
                         previewZoom = (previewZoom * 1.25f).coerceAtMost(3f)
                     }
-                    SmallCanvasControl(Icons.Default.Apps, "Fit flow") {
+                    SmallCanvasDrawableControl(R.drawable.ic_flow_arrange, "Fit flow") {
                         previewZoom = 1f
                         previewPan = Offset.Zero
                     }
@@ -3980,8 +4009,8 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
                 ) {
                     metadata.forEach { (label, value) ->
                         Column(Modifier.weight(1f, fill = false)) {
-                            Text(label, fontSize = 9.sp, color = UiColor.onSurfaceVariant)
-                            Text(value, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(label, fontSize = 11.sp, color = UiColor.onSurfaceVariant)
+                            Text(value, fontSize = 13.sp, color = UiColor.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
@@ -4007,6 +4036,13 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
         )
     }
     }
+}
+
+/** Maps the built-in green choice, including legacy saved flows, to the theme's flow semantic. */
+@Composable private fun themedFlowConnectorColor(connectorColor: Long): Color = when (connectorColor) {
+    ConnectorPalette.Green,
+    0xFF69B83AL -> UiColor.extra.marker
+    else -> Color(connectorColor.toInt())
 }
 
 /** Full-screen viewer for inspecting an individual screenshot without changing the diagram. */
@@ -4053,12 +4089,16 @@ private fun fittedScreenshotRectInPadding(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val hostActivity = LocalActivity.current
-    val viewerBarColor = UiColor.background
-    val lightboxStatusBar = Color.White
-    val lightViewerTheme = viewerBarColor.luminance() > .5f
-    // The lightbox always uses a white status bar with dark system icons.
-    // This matters on devices that reserve an opaque status-bar region rather
-    // than allowing the dialog to draw behind it.
+    val workspace = UiColor.extra
+    val lightViewerTheme = UiColor.background.luminance() > .5f
+    val viewerBarColor = if (lightViewerTheme) UiColor.background else workspace.darkSurfaceVariant
+    val lightboxStatusBar = if (lightViewerTheme) UiColor.surface else workspace.statusBar
+    val viewerSurface = if (lightViewerTheme) UiColor.surface else workspace.darkSurface
+    val viewerSurfaceVariant = if (lightViewerTheme) UiColor.surfaceVariant else workspace.darkSurfaceVariant
+    val viewerOutline = if (lightViewerTheme) UiColor.outlineVariant else workspace.darkOutline
+    val viewerOnSurface = if (lightViewerTheme) UiColor.onSurface else workspace.onDarkSurface
+    val viewerMuted = if (lightViewerTheme) UiColor.onSurfaceVariant else workspace.darkOnSurfaceMuted
+    // The Lightbox follows the selected app theme, including its system bars.
     androidx.compose.runtime.DisposableEffect(hostActivity, viewerBarColor) {
         val hostWindow = hostActivity?.window ?: return@DisposableEffect onDispose { }
         val controller = WindowCompat.getInsetsController(hostWindow, hostWindow.decorView)
@@ -4068,7 +4108,7 @@ private fun fittedScreenshotRectInPadding(
         val previousNavigationBarColor = hostWindow.navigationBarColor
         hostWindow.statusBarColor = lightboxStatusBar.toArgb()
         hostWindow.navigationBarColor = viewerBarColor.toArgb()
-        controller.isAppearanceLightStatusBars = true
+        controller.isAppearanceLightStatusBars = lightViewerTheme
         controller.isAppearanceLightNavigationBars = lightViewerTheme
         onDispose {
             hostWindow.statusBarColor = previousStatusBarColor
@@ -4085,11 +4125,11 @@ private fun fittedScreenshotRectInPadding(
     var showDeleteConfirmation by remember { mutableStateOf(false) }
     var editingPointer by remember(screen.id) { mutableStateOf(false) }
     var pointerPosition by remember(screen.id) { mutableStateOf(Offset(screen.markerX, screen.markerY)) }
-    val pointerGuide = UiColor.onPrimary.copy(alpha = .45f)
-    val pointerShadow = UiColor.inverseSurface.copy(alpha = .38f)
-    val pointerRing = UiColor.onPrimary.copy(alpha = .9f)
-    val pointerAccent = UiColor.primary
-    val pointerCenter = UiColor.onPrimary
+    val pointerGuide = viewerOnSurface.copy(alpha = .45f)
+    val pointerShadow = viewerBarColor.copy(alpha = .72f)
+    val pointerRing = viewerOnSurface.copy(alpha = .9f)
+    val pointerAccent = workspace.marker
+    val pointerCenter = viewerOnSurface
     val backdropAlpha by animateFloatAsState(
         targetValue = if (visible) 1f else 0f,
         animationSpec = tween(180),
@@ -4138,7 +4178,7 @@ private fun fittedScreenshotRectInPadding(
                 it.statusBarColor = lightboxStatusBar.toArgb()
                 it.navigationBarColor = viewerBarColor.toArgb()
                 val dialogController = WindowCompat.getInsetsController(it, dialogView)
-                dialogController.isAppearanceLightStatusBars = true
+                dialogController.isAppearanceLightStatusBars = lightViewerTheme
                 dialogController.isAppearanceLightNavigationBars = lightViewerTheme
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -4149,7 +4189,7 @@ private fun fittedScreenshotRectInPadding(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer(alpha = backdropAlpha)
-                .background(UiColor.background.copy(alpha = .96f))
+                .background(viewerBarColor.copy(alpha = .98f))
                 .clickable(interactionSource = backdropInteractionSource, indication = null, onClick = requestClose),
             contentAlignment = Alignment.Center
         ) {
@@ -4170,9 +4210,9 @@ private fun fittedScreenshotRectInPadding(
                     .offset(y = (-63).dp)
                     .graphicsLayer(scaleX = imageScale, scaleY = imageScale)
                     .clickable(interactionSource = consumeTapInteractionSource, indication = null, onClick = {}),
-                color = UiColor.surface,
+                color = viewerSurface,
                 shape = RoundedCornerShape(20.dp),
-                border = BorderStroke(1.dp, UiColor.onPrimary.copy(alpha = .12f)),
+                border = BorderStroke(1.dp, viewerOutline),
                 shadowElevation = 24.dp
             ) {
                 val pointerDragModifier = if (editingPointer) {
@@ -4232,11 +4272,11 @@ private fun fittedScreenshotRectInPadding(
                         ) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(30.dp),
-                                color = UiColor.onSurface,
+                                color = viewerOnSurface,
                                 strokeWidth = 3.dp
                             )
                             Spacer(Modifier.height(12.dp))
-                            Text("Loading screenshot…", color = UiColor.onSurface, fontSize = 14.sp)
+                            Text("Loading screenshot…", color = viewerOnSurface, fontSize = 14.sp)
                         }
                     } else {
                         Column(
@@ -4245,9 +4285,9 @@ private fun fittedScreenshotRectInPadding(
                         ) {
                             Icon(Icons.Default.Close, contentDescription = null, tint = UiColor.error, modifier = Modifier.size(30.dp))
                             Spacer(Modifier.height(12.dp))
-                            Text("Screenshot unavailable", color = UiColor.onSurface, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                            Text("Screenshot unavailable", color = viewerOnSurface, fontSize = 16.sp, fontWeight = FontWeight.Medium)
                             Spacer(Modifier.height(4.dp))
-                            Text("The file was moved, deleted, or could not be read.", color = UiColor.onSurfaceVariant, fontSize = 13.sp, textAlign = TextAlign.Center)
+                            Text("The file was moved, deleted, or could not be read.", color = viewerMuted, fontSize = 13.sp, textAlign = TextAlign.Center)
                         }
                     }
                     if (editingPointer) {
@@ -4290,15 +4330,15 @@ private fun fittedScreenshotRectInPadding(
                         .clip(CircleShape)
                         .clickable(onClick = requestClose),
                     shape = CircleShape,
-                    color = UiColor.surface.copy(alpha = .96f),
-                    border = BorderStroke(1.dp, UiColor.extra.darkOutline),
+                    color = viewerSurface.copy(alpha = .96f),
+                    border = BorderStroke(1.dp, viewerOutline),
                     shadowElevation = 6.dp
                 ) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Cancel",
-                            tint = UiColor.onSurface,
+                            tint = viewerOnSurface,
                             modifier = Modifier.size(26.dp)
                         )
                     }
@@ -4309,14 +4349,14 @@ private fun fittedScreenshotRectInPadding(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .offset(y = (-164).dp),
-                    color = UiColor.surfaceVariant,
+                    color = viewerSurfaceVariant,
                     shape = RoundedCornerShape(16.dp)
                 ) {
                     Text(
                         "Swipe to browse  •  ${screenPosition + 1} / $screenCount",
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        color = UiColor.onSurface,
-                        fontSize = 10.sp,
+                        color = viewerOnSurface,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Medium
                     )
                 }
@@ -4326,14 +4366,14 @@ private fun fittedScreenshotRectInPadding(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .offset(y = (-164).dp),
-                    color = UiColor.surfaceVariant,
+                    color = viewerSurfaceVariant,
                     shape = RoundedCornerShape(16.dp)
                 ) {
                     Text(
                         "Drag the marker to adjust the pointer",
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        color = UiColor.onSurface,
-                        fontSize = 10.sp,
+                        color = viewerOnSurface,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Medium
                     )
                 }
@@ -4345,9 +4385,9 @@ private fun fittedScreenshotRectInPadding(
                     .height(84.dp)
                     .offset(y = (-72).dp)
                     .clickable(interactionSource = consumeTapInteractionSource, indication = null, onClick = {}),
-                color = UiColor.surface,
-                shape = RoundedCornerShape(28.dp),
-                border = BorderStroke(1.dp, UiColor.extra.darkOutline),
+                color = viewerSurface,
+                shape = RoundedCornerShape(20.dp),
+                border = BorderStroke(1.dp, viewerOutline),
                 shadowElevation = 16.dp
             ) {
                 Row(
@@ -4356,11 +4396,11 @@ private fun fittedScreenshotRectInPadding(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     if (editingPointer) {
-                        LightboxAction(Icons.Default.Close, "Cancel") {
+                        LightboxAction(Icons.Default.Close, "Cancel", tint = viewerOnSurface) {
                             pointerPosition = Offset(screen.markerX, screen.markerY)
                             editingPointer = false
                         }
-                        LightboxAction(Icons.Default.Check, "Save") {
+                        LightboxAction(Icons.Default.Check, "Save", tint = viewerOnSurface) {
                             onUpdatePointer(screen, pointerPosition.x, pointerPosition.y)
                             editingPointer = false
                         }
@@ -4386,19 +4426,19 @@ private fun fittedScreenshotRectInPadding(
                         }.onFailure {
                             android.widget.Toast.makeText(context, "Unable to share screenshot", android.widget.Toast.LENGTH_SHORT).show()
                         }
-                    })
+                    }, tint = viewerOnSurface)
                     LightboxDrawableAction(
                         R.drawable.ic_lightbox_delete,
                         "Delete",
                         onClick = { showDeleteConfirmation = true },
-                        tint = UiColor.onSurface
+                        tint = viewerOnSurface
                     )
                     LightboxDrawableAction(R.drawable.ic_lightbox_replace, "Replace", onClick = {
                         onReplace(screen)
-                    })
+                    }, tint = viewerOnSurface)
                     LightboxDrawableAction(R.drawable.ic_lightbox_edit, "Edit", onClick = {
                         editingPointer = true
-                    })
+                    }, tint = viewerOnSurface)
                     }
                 }
             }
@@ -4407,32 +4447,42 @@ private fun fittedScreenshotRectInPadding(
     if (showDeleteConfirmation) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirmation = false },
-            containerColor = UiColor.surface,
+            containerColor = viewerSurface,
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("⚠", color = UiColor.extra.warning, fontSize = 32.sp)
+                    Surface(
+                        modifier = Modifier.size(42.dp),
+                        shape = CircleShape,
+                        color = UiColor.extra.destructiveContainer
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("!", color = UiColor.error, fontSize = 23.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
                     Spacer(Modifier.width(12.dp))
-                    Text("Deleting screenshot", color = UiColor.secondary, fontWeight = FontWeight.Medium)
+                    Text("Delete screenshot?", color = viewerOnSurface, fontWeight = FontWeight.SemiBold)
                 }
             },
             text = {
                 Text(
                     "This screenshot will be permanently deleted. Are you sure you want to do this?",
-                    color = UiColor.onSurface,
+                    color = viewerOnSurface,
                     fontSize = 17.sp
                 )
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirmation = false }) {
-                    Text("CANCEL", color = UiColor.secondary)
+                    Text("Cancel", color = viewerMuted)
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
+                Button(onClick = {
                     showDeleteConfirmation = false
                     onDelete(screen)
                     requestClose()
-                }) { Text("OK", color = UiColor.secondary) }
+                }, shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = UiColor.error, contentColor = UiColor.onError)) {
+                    Text("Delete", fontWeight = FontWeight.Bold)
+                }
             }
         )
     }
@@ -4454,7 +4504,7 @@ private fun fittedScreenshotRectInPadding(
             Icon(icon, label, tint = tint, modifier = Modifier.size(25.dp))
         }
         Spacer(Modifier.height(5.dp))
-        Text(label, color = tint, fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = .1.sp)
+        Text(label, color = tint, fontSize = 12.sp, lineHeight = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = .1.sp)
     }
 }
 
@@ -4480,7 +4530,7 @@ private fun fittedScreenshotRectInPadding(
             )
         }
         Spacer(Modifier.height(5.dp))
-        Text(label, color = tint, fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = .1.sp)
+        Text(label, color = tint, fontSize = 12.sp, lineHeight = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = .1.sp)
     }
 }
 
@@ -4495,7 +4545,7 @@ private fun fittedScreenshotRectInPadding(
     columnsOverride: Int? = null,
     onScreenClick: (ScreenEntity) -> Unit = {}
 ) {
-    val canvasSurface = MaterialTheme.colorScheme.surface
+    val canvasSurface = UiColor.surface
     Canvas(
     modifier.pointerInput(screens, bitmaps, columnsOverride) {
         detectTapGestures { tap ->

@@ -13,17 +13,18 @@ import androidx.compose.ui.graphics.Color
  * a dark scheme can be introduced by swapping this scheme and these extras.
  */
 val FlowSnapLightColorScheme = lightColorScheme(
-    primary = Color(0xFF4F46E5),
+    primary = Color(0xFF5B5CEB),
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFEEF2FF),
-    onPrimaryContainer = Color(0xFF312E81),
-    secondary = Color(0xFF312E81),
+    primaryContainer = Color(0xFFEEEEFF),
+    onPrimaryContainer = Color(0xFF303166),
+    secondary = Color(0xFF45465A),
     onSecondary = Color.White,
     secondaryContainer = Color(0xFFF1F3FF),
     onSecondaryContainer = Color(0xFF202B3B),
-    tertiary = Color(0xFF69B83A),
-    onTertiary = Color.White,
-    error = Color(0xFFB3261E),
+    // Green is reserved for the flow itself: connectors, markers and endpoints.
+    tertiary = Color(0xFF57C84D),
+    onTertiary = Color(0xFF09280E),
+    error = Color(0xFFC83B42),
     onError = Color.White,
     background = Color(0xFFF5F6FA),
     onBackground = Color(0xFF202B3B),
@@ -35,23 +36,23 @@ val FlowSnapLightColorScheme = lightColorScheme(
     outlineVariant = Color(0xFFE3E7EF),
     inverseSurface = Color(0xFF1A1A1A),
     inverseOnSurface = Color.White,
-    inversePrimary = Color(0xFFA5B4FC),
+    inversePrimary = Color(0xFF8988F5),
     scrim = Color(0xCC05070B)
 )
 
 val FlowSnapDarkColorScheme = darkColorScheme(
-    primary = Color(0xFFF2F2F2),
-    onPrimary = Color(0xFF101010),
-    primaryContainer = Color(0xFF2B2B2B),
-    onPrimaryContainer = Color(0xFFF2F2F2),
-    secondary = Color(0xFFE0E0E0),
-    onSecondary = Color(0xFF171717),
-    secondaryContainer = Color(0xFF242424),
-    onSecondaryContainer = Color(0xFFE0E0E0),
-    tertiary = Color(0xFFD0D0D0),
-    onTertiary = Color(0xFF171717),
-    error = Color(0xFFE6E6E6),
-    onError = Color(0xFF171717),
+    primary = Color(0xFFA9A8FF),
+    onPrimary = Color(0xFF202052),
+    primaryContainer = Color(0xFF34336B),
+    onPrimaryContainer = Color(0xFFE8E7FF),
+    secondary = Color(0xFFD7D6E8),
+    onSecondary = Color(0xFF1A1A25),
+    secondaryContainer = Color(0xFF292936),
+    onSecondaryContainer = Color(0xFFE6E5F4),
+    tertiary = Color(0xFF67D95D),
+    onTertiary = Color(0xFF08250D),
+    error = Color(0xFFFF6B72),
+    onError = Color(0xFF3A0E14),
     background = Color(0xFF0A0A0A),
     onBackground = Color(0xFFF5F5F5),
     surface = Color(0xFF171717),
@@ -62,7 +63,7 @@ val FlowSnapDarkColorScheme = darkColorScheme(
     outlineVariant = Color(0xFF303030),
     inverseSurface = Color(0xFFF5F5F5),
     inverseOnSurface = Color(0xFF202020),
-    inversePrimary = Color(0xFFF2F2F2),
+    inversePrimary = Color(0xFF5B5CEB),
     scrim = Color(0xFF000000)
 )
 
@@ -89,44 +90,44 @@ data class FlowSnapExtraColors(
 
 val FlowSnapLightExtraColors = FlowSnapExtraColors(
     canvasBackground = Color(0xFFF1F4FA),
-    canvasMinorGrid = Color(0xFFDCE3EF).copy(alpha = .72f),
-    canvasMajorGrid = Color(0xFFC5D0E2).copy(alpha = .70f),
+    canvasMinorGrid = Color(0xFFDCE3EF).copy(alpha = .52f),
+    canvasMajorGrid = Color(0xFFC5D0E2).copy(alpha = .56f),
     canvasNodeBorder = Color(0xFF475569),
     screenshotPlaceholder = Color(0xFFE2E8F0),
     screenshotPlaceholderIcon = Color(0xFF64748B),
-    marker = Color(0xFF4F46E5),
+    marker = Color(0xFF57C84D),
     warning = Color(0xFF9A6700),
     disabled = Color(0xFFB8B8B8),
-    darkSurface = Color(0xFF1A1A1A),
-    darkSurfaceVariant = Color(0xFF101116),
-    darkOutline = Color(0xFF2A2A2A),
-    onDarkSurface = Color.White,
-    darkOnSurfaceMuted = Color(0xFFCBD5E1),
-    destructiveContainer = Color(0xD9111111),
-    statusBar = Color(0xFF171717),
-    editorControl = Color(0xFF4F46E5),
-    editorIcon = Color(0xFF4F46E5)
+    darkSurface = Color(0xFF191B20),
+    darkSurfaceVariant = Color(0xFF131519),
+    darkOutline = Color(0xFF30343C),
+    onDarkSurface = Color(0xFFF4F6FA),
+    darkOnSurfaceMuted = Color(0xFFBAC1CE),
+    destructiveContainer = Color(0xFFFCE8EA),
+    statusBar = Color(0xFF101114),
+    editorControl = Color(0xFFA9A8FF),
+    editorIcon = Color(0xFFA9A8FF)
 )
 
 val FlowSnapDarkExtraColors = FlowSnapExtraColors(
-    canvasBackground = Color(0xFF111111),
-    canvasMinorGrid = Color(0xFF282828).copy(alpha = .72f),
-    canvasMajorGrid = Color(0xFF3C3C3C).copy(alpha = .70f),
-    canvasNodeBorder = Color(0xFF6B6B6B),
-    screenshotPlaceholder = Color(0xFF2A2A2A),
-    screenshotPlaceholderIcon = Color(0xFFB8B8B8),
-    marker = Color(0xFFF2F2F2),
+    canvasBackground = Color(0xFF101114),
+    canvasMinorGrid = Color(0xFF282B31).copy(alpha = .54f),
+    canvasMajorGrid = Color(0xFF3A3E47).copy(alpha = .58f),
+    canvasNodeBorder = Color(0xFF5A606B),
+    screenshotPlaceholder = Color(0xFF282B31),
+    screenshotPlaceholderIcon = Color(0xFFB5BCC8),
+    marker = Color(0xFF67D95D),
     warning = Color(0xFFD6D6D6),
     disabled = Color(0xFF777777),
-    darkSurface = Color(0xFF171717),
-    darkSurfaceVariant = Color(0xFF101010),
-    darkOutline = Color(0xFF303030),
-    onDarkSurface = Color(0xFFF5F5F5),
-    darkOnSurfaceMuted = Color(0xFFB8B8B8),
-    destructiveContainer = Color(0xFF292929),
-    statusBar = Color(0xFF0A0A0A),
-    editorControl = Color(0xFF666666),
-    editorIcon = Color(0xFFF5F5F5)
+    darkSurface = Color(0xFF191B20),
+    darkSurfaceVariant = Color(0xFF131519),
+    darkOutline = Color(0xFF30343C),
+    onDarkSurface = Color(0xFFF4F6FA),
+    darkOnSurfaceMuted = Color(0xFFBAC1CE),
+    destructiveContainer = Color(0xFF462126),
+    statusBar = Color(0xFF101114),
+    editorControl = Color(0xFFA9A8FF),
+    editorIcon = Color(0xFFA9A8FF)
 )
 
 val LocalFlowSnapExtraColors = staticCompositionLocalOf { FlowSnapLightExtraColors }
@@ -158,8 +159,8 @@ object UiColor {
 
 /** Connector choices are user data, not the app chrome palette. */
 object ConnectorPalette {
-    const val Green = 0xFF69B83AL
-    const val Indigo = 0xFF4F46E5L
+    const val Green = 0xFF57C84DL
+    const val Indigo = 0xFF5B5CEBL
     const val Red = 0xFFE05252L
     const val Charcoal = 0xFF4D4D4DL
     const val Orange = 0xFFF39C12L

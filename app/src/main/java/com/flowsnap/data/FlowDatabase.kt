@@ -21,7 +21,7 @@ import kotlinx.coroutines.flow.Flow
 import java.util.UUID
 
 @Entity(tableName = "flows")
-data class FlowEntity(@PrimaryKey val id: String, val name: String, val createdAt: Long, val updatedAt: Long, val diagramVersion: String = "v1.0", val createdBy: String = "You", val showTitle: Boolean = true, val showVersion: Boolean = true, val showCreatedAt: Boolean = true, val showCreatedBy: Boolean = true, val showAppVersion: Boolean = false, val showMobileStencils: Boolean = true, val connectorColor: Long = 0xFF69B83AL, val preferredRows: Int = 2, val preferredColumns: Int = 5, val canvasZoom: Float = 1f, val canvasPanX: Float = 0f, val canvasPanY: Float = 0f)
+data class FlowEntity(@PrimaryKey val id: String, val name: String, val createdAt: Long, val updatedAt: Long, val diagramVersion: String = "v1.0", val createdBy: String = "You", val showTitle: Boolean = true, val showVersion: Boolean = true, val showCreatedAt: Boolean = true, val showCreatedBy: Boolean = true, val showAppVersion: Boolean = false, val showMobileStencils: Boolean = true, val connectorColor: Long = 0xFF57C84DL, val preferredRows: Int = 2, val preferredColumns: Int = 5, val canvasZoom: Float = 1f, val canvasPanX: Float = 0f, val canvasPanY: Float = 0f)
 
 @Entity(tableName = "screens", foreignKeys = [ForeignKey(entity = FlowEntity::class, parentColumns = ["id"], childColumns = ["flowId"], onDelete = ForeignKey.CASCADE)], indices = [Index("flowId")])
 data class ScreenEntity(@PrimaryKey val id: String, val flowId: String, val imagePath: String, val markerX: Float, val markerY: Float, val position: Int, val createdAt: Long, val canvasX: Float = 0f, val canvasY: Float = 0f)
