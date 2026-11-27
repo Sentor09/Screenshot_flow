@@ -6,7 +6,6 @@ import android.app.Activity
 import android.Manifest
 import android.content.pm.PackageManager
 import android.content.Context
-import android.content.res.Configuration
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
 import android.content.Intent
@@ -39,13 +38,18 @@ import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.ime
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -70,9 +74,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Apps
-import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.PhoneAndroid
@@ -108,7 +110,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.SideEffect
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.slideInHorizontally
@@ -155,6 +156,8 @@ import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.shape.CircleShape
 import androidx.core.content.ContextCompat
@@ -252,17 +255,7 @@ class MainActivity : ComponentActivity() {
     @Suppress("DEPRECATION") // Fallback colors for devices with opaque system-bar regions.
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val storedTheme = getSharedPreferences(APP_SETTINGS, MODE_PRIVATE).getString(PREF_THEME_MODE, null)
-        val launchUsesDarkTheme = when (storedTheme) {
-            THEME_DARK -> true
-            THEME_LIGHT -> false
-            else -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
-        }
-        window.setBackgroundDrawable(
-            (if (launchUsesDarkTheme) FlowSnapDarkColorScheme.background else FlowSnapLightColorScheme.background)
-                .toArgb()
-                .toDrawable()
-        )
+        window.setBackgroundDrawable(FlowSnapLightColorScheme.background.toArgb().toDrawable())
         enableEdgeToEdge()
         // enableEdgeToEdge establishes transparent system bars and keeps the
         // content layout stable while individual overlays are shown.
@@ -271,39 +264,42 @@ class MainActivity : ComponentActivity() {
         acceptReviewIntent(intent)
         ContextCompat.registerReceiver(this, captureReadyReceiver, IntentFilter(CaptureService.ACTION_CAPTURE_READY), ContextCompat.RECEIVER_NOT_EXPORTED)
         setContent {
-            // isSystemInDarkTheme observes Configuration changes. With no
-            // explicit in-app choice saved, this stays in sync live.
-            val systemDarkTheme = isSystemInDarkTheme()
-            val themePreferences = remember { getSharedPreferences(APP_SETTINGS, MODE_PRIVATE) }
-            var themeOverride by remember {
-                mutableStateOf(themePreferences.getString(PREF_THEME_MODE, null))
+            val colorScheme = FlowSnapLightColorScheme
+            val extraColors = FlowSnapLightExtraColors
+            val onboardingPreferences = remember { getSharedPreferences(APP_SETTINGS, MODE_PRIVATE) }
+            var onboardingComplete by remember { mutableStateOf(onboardingPreferences.getBoolean("onboarding_complete", false)) }
+            var showSplash by remember { mutableStateOf(savedInstanceState == null && review == null) }
+            androidx.compose.runtime.LaunchedEffect(showSplash) {
+                if (showSplash) {
+                    delay(2000.milliseconds)
+                    showSplash = false
+                }
             }
-            val useDarkTheme = when (themeOverride) {
-                THEME_DARK -> true
-                THEME_LIGHT -> false
-                else -> systemDarkTheme
-            }
-            val colorScheme = if (useDarkTheme) FlowSnapDarkColorScheme else FlowSnapLightColorScheme
-            val extraColors = if (useDarkTheme) FlowSnapDarkExtraColors else FlowSnapLightExtraColors
+            val splashVisible = showSplash && review == null
             SideEffect {
-                window.statusBarColor = colorScheme.background.toArgb()
-                window.navigationBarColor = colorScheme.background.toArgb()
-                WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = !useDarkTheme
-                WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightNavigationBars = !useDarkTheme
+                window.statusBarColor = (if (splashVisible) Color(0xFF254D72) else colorScheme.background).toArgb()
+                window.navigationBarColor = (if (splashVisible) Color(0xFF37265F) else colorScheme.background).toArgb()
+                WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = !splashVisible
+                WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightNavigationBars = !splashVisible
             }
             MaterialTheme(colorScheme = colorScheme, typography = FlowSnapTypography) {
                 CompositionLocalProvider(LocalFlowSnapExtraColors provides extraColors) {
-                    FlowSnapApp(
-                        review = review,
-                        dismissReview = { review = null },
-                        themeOverride = themeOverride,
-                        onThemeChange = { mode ->
-                            themeOverride = mode
-                            themePreferences.edit {
-                                if (mode == null) remove(PREF_THEME_MODE) else putString(PREF_THEME_MODE, mode)
+                    if (splashVisible) {
+                        FlowSnapSplash()
+                    } else if (!onboardingComplete && review == null) {
+                        FlowSnapOnboarding { startGuide ->
+                            onboardingPreferences.edit {
+                                putBoolean("onboarding_complete", true)
+                                putString("capture_guide_stage", if (startGuide) "create" else "")
                             }
+                            onboardingComplete = true
                         }
-                    )
+                    } else {
+                        FlowSnapApp(
+                            review = review,
+                            dismissReview = { review = null }
+                        )
+                    }
                 }
             }
         }
@@ -326,6 +322,141 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         unregisterReceiver(captureReadyReceiver)
         super.onDestroy()
+    }
+}
+
+@Composable private fun FlowSnapOnboarding(onFinish: (Boolean) -> Unit) {
+    val titles = listOf("Capture the journey", "Build your flow", "Share your work")
+    val descriptions = listOf(
+        "Capture screenshots as you move through an app. Mark the spot that leads to the next step.",
+        "Turn your screenshots into a clear diagram. Adjust the layout, labels, and connector colors.",
+        "Export your diagram as an image, PDF, or editable SVG when you're ready to share."
+    )
+    val icons = listOf(Icons.Default.PhoneAndroid, Icons.Default.Apps, Icons.Default.PictureAsPdf)
+    val pagerState = androidx.compose.foundation.pager.rememberPagerState(pageCount = { titles.size })
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val page = pagerState.currentPage
+    Column(
+        modifier = Modifier.fillMaxSize().background(UiColor.background)
+            .windowInsetsPadding(WindowInsets.systemBars).padding(horizontal = 24.dp, vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("FlowSnap", color = UiColor.primary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = { onFinish(false) }) { Text("Skip", color = UiColor.onSurfaceVariant, fontSize = 14.sp) }
+        }
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.weight(1f).fillMaxWidth()
+        ) { pageIndex ->
+            Column(
+                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    Modifier.size(180.dp).background(UiColor.surfaceVariant, RoundedCornerShape(42.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(Modifier.size(112.dp).background(UiColor.surface, RoundedCornerShape(30.dp)), contentAlignment = Alignment.Center) {
+                        Icon(icons[pageIndex], contentDescription = null, tint = UiColor.primary, modifier = Modifier.size(58.dp))
+                    }
+                }
+                Spacer(Modifier.height(36.dp))
+                Text(titles[pageIndex], color = UiColor.onSurface, fontSize = 27.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(12.dp))
+                Text(descriptions[pageIndex], color = UiColor.onSurfaceVariant, fontSize = 16.sp, lineHeight = 23.sp, textAlign = TextAlign.Center)
+            }
+        }
+        val indicatorColor = UiColor.primary
+        val inactiveIndicatorColor = UiColor.outline
+        Canvas(Modifier.size(width = 72.dp, height = 8.dp)) {
+            val step = 24.dp.toPx()
+            val dotRadius = 4.dp.toPx()
+            repeat(titles.size) { index ->
+                drawCircle(inactiveIndicatorColor, dotRadius, Offset(step / 2f + index * step, size.height / 2f))
+            }
+            val position = (pagerState.currentPage + pagerState.currentPageOffsetFraction)
+                .coerceIn(0f, titles.lastIndex.toFloat())
+            drawRoundRect(
+                color = indicatorColor,
+                topLeft = Offset(position * step, 0f),
+                size = androidx.compose.ui.geometry.Size(step, size.height),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.height / 2f)
+            )
+        }
+        Spacer(Modifier.height(22.dp))
+        Button(
+            onClick = { if (page == titles.lastIndex) onFinish(true) else scope.launch { pagerState.animateScrollToPage(page + 1) } },
+            modifier = Modifier.fillMaxWidth().height(52.dp),
+            shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = UiColor.primary, contentColor = UiColor.onPrimary)
+        ) { Text(if (page == titles.lastIndex) "Get started" else "Next", fontSize = 16.sp, fontWeight = FontWeight.Bold) }
+        if (page > 0) {
+            TextButton(onClick = { scope.launch { pagerState.animateScrollToPage(page - 1) } }, modifier = Modifier.height(48.dp)) {
+                Text("Back", color = UiColor.onSurfaceVariant, fontWeight = FontWeight.SemiBold)
+            }
+        } else {
+            Spacer(Modifier.height(48.dp))
+        }
+    }
+}
+
+@Composable private fun FlowSnapSplash() {
+    val iconProgress = remember { androidx.compose.animation.core.Animatable(0f) }
+    val wordmarkProgress = remember { androidx.compose.animation.core.Animatable(0f) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        // Give Compose a frame to display the initial state before animating.
+        androidx.compose.runtime.withFrameNanos { }
+        launch { iconProgress.animateTo(1f, animationSpec = tween(durationMillis = 850)) }
+        delay(300.milliseconds)
+        wordmarkProgress.animateTo(1f, animationSpec = tween(durationMillis = 850))
+    }
+    Box(
+        modifier = Modifier.fillMaxSize().drawBehind {
+            drawRect(Brush.linearGradient(
+                colors = listOf(Color(0xFF254D72), Color(0xFF253E82), Color(0xFF303277), Color(0xFF37265F)),
+                start = Offset.Zero,
+                end = Offset(size.width * .8f, size.height)
+            ))
+            drawRect(Brush.radialGradient(
+                colors = listOf(Color(0xFF64418F).copy(alpha = .32f), Color.Transparent),
+                center = Offset(size.width * .9f, size.height * .75f),
+                radius = size.maxDimension * .65f
+            ))
+        },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            androidx.compose.foundation.Image(
+                painter = painterResource(R.drawable.splash_app_icon),
+                contentDescription = null,
+                modifier = Modifier.size(88.dp).clip(RoundedCornerShape(32.dp)).graphicsLayer {
+                    alpha = iconProgress.value
+                    scaleX = .65f + .35f * iconProgress.value
+                    scaleY = scaleX
+                    translationY = (1f - iconProgress.value) * (-24).dp.toPx()
+                }.drawWithContent {
+                    clipRect(right = size.width * iconProgress.value) { this@drawWithContent.drawContent() }
+                }
+            )
+            Spacer(Modifier.height(16.dp))
+            Text(
+                "FlowSnap",
+                modifier = Modifier.graphicsLayer {
+                    alpha = wordmarkProgress.value
+                    translationY = (1f - wordmarkProgress.value) * 24.dp.toPx()
+                }.drawWithContent {
+                    clipRect(right = size.width * wordmarkProgress.value) { this@drawWithContent.drawContent() }
+                },
+                color = Color.White,
+                fontFamily = FontFamily.SansSerif,
+                fontSize = 32.sp,
+                fontWeight = FontWeight.Medium,
+                letterSpacing = .5.sp
+            )
+        }
     }
 }
 
@@ -521,33 +652,27 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
 private const val APP_SETTINGS = "flowsnap_settings"
 private const val PREF_DEFAULT_FLOW_NAME = "default_flow_name"
 private const val PREF_CONNECTOR_COLOR = "connector_color"
-private const val PREF_THEME_MODE = "theme_mode"
-private const val THEME_LIGHT = "light"
-private const val THEME_DARK = "dark"
 
 /** A high-contrast selection mark that remains legible on every connector color. */
-@Composable private fun ConnectorSelectionMark(modifier: Modifier = Modifier) {
-    Box(
-        modifier.background(UiColor.surface.copy(alpha = .94f), CircleShape),
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(Icons.Default.Check, contentDescription = "Selected", tint = UiColor.onSurface, modifier = Modifier.fillMaxSize(.68f))
-    }
+@Composable private fun ConnectorSelectionMark(color: Color, modifier: Modifier = Modifier) {
+    Icon(
+        Icons.Default.Check,
+        contentDescription = "Selected",
+        tint = if (color.luminance() > .18f) Color.Black else Color.White,
+        modifier = modifier
+    )
 }
 
 @Suppress("DEPRECATION") // Fallback colors for devices with opaque system-bar regions.
 @Composable private fun FlowSnapApp(
     review: CaptureReview?,
     dismissReview: () -> Unit,
-    themeOverride: String?,
-    onThemeChange: (String?) -> Unit,
     vm: FlowViewModel = viewModel()
 ) {
     Box(Modifier.fillMaxSize().background(UiColor.surface)) {
         var selectedFlowId by rememberSaveable { mutableStateOf<String?>(null) }
-        var settingsOpen by rememberSaveable { mutableStateOf(false) }
         var lightboxOpen by remember { mutableStateOf(false) }
-        val workspaceOpen = selectedFlowId != null && review == null && !settingsOpen
+        val workspaceOpen = selectedFlowId != null && review == null
         val hostActivity = LocalActivity.current
         val appBackground = UiColor.background
         val workspaceStatusBar = UiColor.extra.statusBar
@@ -576,14 +701,8 @@ private const val THEME_DARK = "dark"
         if (review != null) CaptureReviewScreen(review, vm, dismissReview, onFinish = { savedFlow ->
             if (savedFlow != null) selectedFlowId = savedFlow.id
             dismissReview()
-        }) else if (settingsOpen) {
-            AppSettingsScreen(
-                themeOverride = themeOverride,
-                onThemeChange = onThemeChange,
-                close = { settingsOpen = false }
-            )
-        } else if (selectedFlowId == null) {
-            HomeScreen(vm, openSettings = { settingsOpen = true }) { selectedFlowId = it.id }
+        }) else if (selectedFlowId == null) {
+            HomeScreen(vm) { selectedFlowId = it.id }
         } else {
             // The preceding null branch guarantees this route has an id.
             val flowId = requireNotNull(selectedFlowId)
@@ -608,16 +727,18 @@ private const val THEME_DARK = "dark"
 
 @Composable private fun HomeScreen(
     vm: FlowViewModel,
-    openSettings: () -> Unit,
     openFlow: (FlowEntity) -> Unit
 ) {
     val flows by vm.flows.collectAsStateWithLifecycle()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val guidePreferences = remember { context.getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE) }
+    val showCreateGuide = remember { guidePreferences.getString("capture_guide_stage", "") == "create" }
     // Keep gallery cards above the Android gesture/three-button navigation area.
     Column(Modifier.fillMaxSize().background(UiColor.background).windowInsetsPadding(WindowInsets.systemBars)) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .height(64.dp)
+                .height(56.dp)
                 .zIndex(1f)
                 .shadow(
                     elevation = 6.dp,
@@ -625,16 +746,22 @@ private const val THEME_DARK = "dark"
                     spotColor = UiColor.onSurface.copy(alpha = .30f)
                 )
                 .background(UiColor.surface)
-                .padding(horizontal = 18.dp),
+                .padding(horizontal = 28.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(Modifier.size(44.dp).clip(CircleShape).clickable(onClick = openSettings), contentAlignment = Alignment.Center) {
-                Icon(Icons.Default.Menu, contentDescription = "Settings", modifier = Modifier.size(28.dp), tint = UiColor.onSurfaceVariant)
-            }
-            Spacer(Modifier.width(20.dp))
             Text("Flow", color = UiColor.secondary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Light, maxLines = 1)
             Text("Snap", color = UiColor.primary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Light, maxLines = 1)
             Spacer(Modifier.weight(1f))
+            Text(
+                text = "${flows.size} ${if (flows.size == 1) "diagram" else "diagrams"}",
+                color = UiColor.onSurfaceVariant,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1
+            )
+        }
+        if (showCreateGuide) {
+            GuideHint("1 of 4", "Tap Create diagram to start your first flow.", Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp))
         }
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
@@ -645,7 +772,10 @@ private const val THEME_DARK = "dark"
         ) {
             item {
                 CreateFlowTile(Modifier.fillMaxWidth().aspectRatio(.72f)) {
-                    vm.createFlow(openFlow)
+                    vm.createFlow { flow ->
+                        if (showCreateGuide) guidePreferences.edit { putString("capture_guide_stage", "capture") }
+                        openFlow(flow)
+                    }
                 }
             }
             items(flows, key = { it.id }) { flow ->
@@ -655,256 +785,12 @@ private const val THEME_DARK = "dark"
     }
 }
 
-@Composable private fun AppSettingsScreen(
-    themeOverride: String?,
-    onThemeChange: (String?) -> Unit,
-    close: () -> Unit
-) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val preferences = remember { context.getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE) }
-    var defaultFlowName by remember { mutableStateOf(preferences.getString(PREF_DEFAULT_FLOW_NAME, "My new app flow").orEmpty()) }
-    var connectorColor by remember { mutableLongStateOf(preferences.getLong(PREF_CONNECTOR_COLOR, ConnectorPalette.Green)) }
-    var showColorPicker by remember { mutableStateOf(false) }
-    val colorOptions = listOf(
-        ConnectorPalette.Green to "Green", ConnectorPalette.Indigo to "Indigo", ConnectorPalette.Red to "Red",
-        ConnectorPalette.Orange to "Orange", ConnectorPalette.Teal to "Teal", ConnectorPalette.Purple to "Purple"
-    )
-    val primaryBlue = UiColor.primary
-
-    Column(
-        Modifier.fillMaxSize().background(UiColor.background).windowInsetsPadding(WindowInsets.systemBars)
-    ) {
-        Row(
-            Modifier.fillMaxWidth().height(64.dp).background(UiColor.surface).padding(horizontal = 18.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                Modifier.size(44.dp).clip(CircleShape).clickable(onClick = close),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back",
-                    tint = UiColor.secondary,
-                    modifier = Modifier.size(26.dp)
-                )
-            }
-            Spacer(Modifier.width(10.dp))
-            Text("Settings", style = MaterialTheme.typography.titleLarge, color = UiColor.onSurface, fontWeight = FontWeight.SemiBold)
+@Composable private fun GuideHint(step: String, message: String, modifier: Modifier = Modifier) {
+    Surface(modifier = modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), color = UiColor.primaryContainer) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Text(step, color = UiColor.primary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text(message, color = UiColor.onSurface, fontSize = 14.sp, lineHeight = 19.sp, fontWeight = FontWeight.Medium)
         }
-        Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            SettingsSectionLabel("APPEARANCE")
-            SettingsCard {
-                ThemeOption(
-                    title = "Use device theme",
-                    subtitle = "Switch automatically with your system setting",
-                    selected = themeOverride == null,
-                    onClick = { onThemeChange(null) }
-                )
-                ThemeOption(
-                    title = "Light theme",
-                    subtitle = "White surfaces and high-contrast text",
-                    selected = themeOverride == THEME_LIGHT,
-                    onClick = { onThemeChange(THEME_LIGHT) }
-                )
-                ThemeOption(
-                    title = "Dark theme",
-                    subtitle = "Dark surfaces for low-light viewing",
-                    selected = themeOverride == THEME_DARK,
-                    onClick = { onThemeChange(THEME_DARK) }
-                )
-            }
-
-            SettingsSectionLabel("NEW DIAGRAM DEFAULTS")
-            SettingsCard {
-                Text("Default flow name", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = UiColor.onSurface)
-                Spacer(Modifier.height(10.dp))
-                CompositionLocalProvider(
-                    LocalTextSelectionColors provides TextSelectionColors(
-                        handleColor = primaryBlue,
-                        backgroundColor = primaryBlue.copy(alpha = .28f)
-                    )
-                ) {
-                    BasicTextField(
-                        value = defaultFlowName,
-                        onValueChange = { defaultFlowName = it },
-                        singleLine = true,
-                        cursorBrush = SolidColor(primaryBlue),
-                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 15.sp, color = UiColor.onSurface),
-                        modifier = Modifier.fillMaxWidth().border(1.dp, UiColor.outline, RoundedCornerShape(10.dp)).padding(horizontal = 14.dp, vertical = 12.dp)
-                    )
-                }
-                Spacer(Modifier.height(16.dp))
-                SettingsActionRow(
-                    title = "Default connector color",
-                    trailing = { Box(Modifier.size(24.dp).background(Color(connectorColor.toInt()), CircleShape).border(1.dp, UiColor.onSurface.copy(alpha = .13f), CircleShape)) },
-                    onClick = { showColorPicker = true }
-                )
-            }
-
-            SettingsSectionLabel("ABOUT")
-            SettingsCard {
-                SettingsActionRow("FlowSnap", trailing = { Text("Version 1.0", fontSize = 13.sp, color = UiColor.onSurfaceVariant) })
-            }
-
-            SettingsSectionLabel("SUPPORT")
-            SettingsCard {
-                SettingsNavigationRow(
-                    title = "Help & feedback",
-                    subtitle = "Get help or share an idea"
-                ) {
-                    android.widget.Toast.makeText(context, "Help & feedback coming soon", android.widget.Toast.LENGTH_SHORT).show()
-                }
-                SettingsNavigationRow(
-                    title = "Privacy policy",
-                    subtitle = "How FlowSnap handles your data"
-                ) {
-                    android.widget.Toast.makeText(context, "Privacy policy coming soon", android.widget.Toast.LENGTH_SHORT).show()
-                }
-                SettingsNavigationRow(
-                    title = "Open-source licenses",
-                    subtitle = "Libraries used by FlowSnap"
-                ) {
-                    android.widget.Toast.makeText(context, "Open-source licenses coming soon", android.widget.Toast.LENGTH_SHORT).show()
-                }
-            }
-
-            Button(
-                onClick = {
-                    preferences.edit {
-                        putString(PREF_DEFAULT_FLOW_NAME, defaultFlowName.trim().ifBlank { "My new app flow" })
-                        putLong(PREF_CONNECTOR_COLOR, connectorColor)
-                    }
-                    android.widget.Toast.makeText(context, "Settings saved", android.widget.Toast.LENGTH_SHORT).show()
-                },
-                modifier = Modifier.fillMaxWidth().height(52.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = primaryBlue)
-            ) { Text("Save changes", fontWeight = FontWeight.Bold) }
-            Spacer(Modifier.height(12.dp))
-        }
-    }
-    if (showColorPicker) {
-        Dialog(
-            onDismissRequest = { showColorPicker = false },
-            properties = DialogProperties(usePlatformDefaultWidth = false)
-        ) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(.86f),
-                color = UiColor.surface,
-                shape = RoundedCornerShape(20.dp),
-                shadowElevation = 18.dp
-            ) {
-                Column(Modifier.padding(horizontal = 24.dp, vertical = 22.dp)) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Connector color", modifier = Modifier.weight(1f), fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = UiColor.onSurface)
-                        Box(
-                            Modifier.size(36.dp).background(UiColor.surfaceVariant, CircleShape).clickable { showColorPicker = false },
-                            contentAlignment = Alignment.Center
-                        ) { Icon(Icons.Default.Close, contentDescription = "Close color picker", tint = UiColor.onSurfaceVariant, modifier = Modifier.size(20.dp)) }
-                    }
-                    Spacer(Modifier.height(18.dp))
-                    colorOptions.chunked(3).forEachIndexed { rowIndex, row ->
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                            row.forEach { (color, _) ->
-                                Box(
-                                    Modifier.weight(1f).height(62.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Box(
-                                        Modifier.size(50.dp)
-                                            .clip(CircleShape)
-                                            .background(Color(color.toInt()), CircleShape)
-                                            .border(if (color == connectorColor) 4.dp else 0.dp, if (color == connectorColor) UiColor.onSurface else UiColor.transparent, CircleShape)
-                                            .clickable { connectorColor = color },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        if (color == connectorColor) ConnectorSelectionMark(Modifier.size(25.dp))
-                                    }
-                                }
-                            }
-                        }
-                        if (rowIndex == 0) Spacer(Modifier.height(10.dp))
-                    }
-                    Spacer(Modifier.height(20.dp))
-                    Button(
-                        onClick = { showColorPicker = false },
-                        modifier = Modifier.fillMaxWidth().height(48.dp),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = primaryBlue)
-                    ) { Text("Done", fontWeight = FontWeight.Bold) }
-                }
-            }
-        }
-    }
-}
-
-@Composable private fun SettingsSectionLabel(label: String) {
-    Text(label, color = UiColor.onSurfaceVariant, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = .8.sp, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
-}
-
-@Composable private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
-    Surface(color = UiColor.surface, shape = RoundedCornerShape(14.dp), shadowElevation = 2.dp) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), content = content)
-    }
-}
-
-@Composable private fun ThemeOption(
-    title: String,
-    subtitle: String,
-    selected: Boolean,
-    onClick: () -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier.size(22.dp).border(2.dp, if (selected) UiColor.primary else UiColor.outline, CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            if (selected) Box(Modifier.size(12.dp).background(UiColor.primary, CircleShape))
-        }
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, color = UiColor.onSurface, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text(subtitle, color = UiColor.onSurfaceVariant, fontSize = 13.sp)
-        }
-    }
-}
-
-@Composable private fun SettingsActionRow(title: String, trailing: @Composable () -> Unit, onClick: (() -> Unit)? = null) {
-    val rowModifier = Modifier.fillMaxWidth().let { modifier ->
-        if (onClick == null) modifier else modifier.clickable(onClick = onClick)
-    }.padding(vertical = 4.dp)
-    Row(rowModifier, verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = UiColor.onSurface)
-        }
-        Spacer(Modifier.width(10.dp))
-        trailing()
-    }
-}
-
-@Composable private fun SettingsNavigationRow(
-    title: String,
-    subtitle: String,
-    onClick: () -> Unit
-) {
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = UiColor.onSurface)
-            Spacer(Modifier.height(3.dp))
-            Text(subtitle, fontSize = 13.sp, color = UiColor.onSurfaceVariant)
-        }
-        Text("›", fontSize = 26.sp, color = UiColor.onSurfaceVariant)
     }
 }
 
@@ -919,7 +805,7 @@ private const val THEME_DARK = "dark"
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             Surface(
                 modifier = Modifier.size(76.dp),
-                shape = CircleShape,
+                shape = RoundedCornerShape(12.dp),
                 color = UiColor.primary,
                 shadowElevation = 2.dp
             ) {
@@ -962,7 +848,7 @@ private const val THEME_DARK = "dark"
                 if (previewScreens.isNotEmpty()) {
                     GalleryFlowPreview(previewScreens, bitmaps)
                 } else {
-                    Text("Your captured flow\nwill appear here", Modifier.align(Alignment.Center), color = UiColor.onSurfaceVariant, fontSize = 13.sp, textAlign = TextAlign.Center, lineHeight = 18.sp)
+                    Text("Your captured flow\nwill appear here", Modifier.align(Alignment.Center), color = UiColor.onSurfaceVariant.copy(alpha = .65f), fontSize = 13.sp, textAlign = TextAlign.Center, lineHeight = 18.sp)
                 }
             }
             Text(
@@ -1034,6 +920,8 @@ private const val THEME_DARK = "dark"
 
 @Composable private fun CaptureReviewScreen(review: CaptureReview, vm: FlowViewModel, dismiss: () -> Unit, onFinish: (FlowEntity?) -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val guidePreferences = remember { context.getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE) }
+    val guideStage = remember(review) { guidePreferences.getString("capture_guide_stage", "").orEmpty() }
     val hostActivity = LocalActivity.current
     val returnToCapturedApp = {
         // Re-attach the overlay before leaving FlowSnap. ACTION_RESUME never
@@ -1059,9 +947,11 @@ private const val THEME_DARK = "dark"
         if (!showCropEditor || hostActivity == null) return@DisposableEffect onDispose { }
         val controller = WindowCompat.getInsetsController(hostActivity.window, hostActivity.window.decorView)
         val previousLightStatusIcons = controller.isAppearanceLightStatusBars
+        val previousLightNavigationIcons = controller.isAppearanceLightNavigationBars
         // This controls only system-bar presentation; it never changes the
         // activity's decor/inset policy or the Review Capture layout.
         controller.isAppearanceLightStatusBars = false
+        controller.isAppearanceLightNavigationBars = false
         // The crop editor is a full-page workspace, so hide the OEM-controlled
         // status-bar surface instead of trying to recolor it. This removes the
         // remaining white band while preserving the host layout underneath.
@@ -1070,6 +960,7 @@ private const val THEME_DARK = "dark"
         onDispose {
             controller.show(WindowInsetsCompat.Type.statusBars())
             controller.isAppearanceLightStatusBars = previousLightStatusIcons
+            controller.isAppearanceLightNavigationBars = previousLightNavigationIcons
         }
     }
     // A user can reposition the marker on this review screen. Persist that
@@ -1161,6 +1052,14 @@ private const val THEME_DARK = "dark"
             shadowElevation = 12.dp
         ) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp)) {
+                if (guideStage == "capture" || guideStage == "finish") {
+                    GuideHint(
+                        if (guideStage == "capture") "3 of 4" else "4 of 4",
+                        if (guideStage == "capture") "Adjust the marker, then tap Keep + next to capture another screen."
+                        else "Review your second capture, then tap Finish to complete your flow."
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1176,7 +1075,13 @@ private const val THEME_DARK = "dark"
                 Button(
                     onClick = {
                         vm.keepCapture(reviewedCapture) { saved ->
-                            if (saved) returnToCapturedApp()
+                            if (saved) {
+                                if (guideStage == "capture") {
+                                    guidePreferences.edit { putString("capture_guide_stage", "finish") }
+                                    android.widget.Toast.makeText(context, "Move the bubble to the next step and tap it to capture again", android.widget.Toast.LENGTH_LONG).show()
+                                }
+                                returnToCapturedApp()
+                            }
                             else android.widget.Toast.makeText(context, "This diagram was deleted; the capture was discarded", android.widget.Toast.LENGTH_LONG).show()
                         }
                     },
@@ -1187,7 +1092,12 @@ private const val THEME_DARK = "dark"
                 Button(
                     onClick = {
                         context.startService(Intent(context, CaptureService::class.java).setAction(CaptureService.ACTION_STOP))
-                        vm.keepCaptureAndOpenDiagram(reviewedCapture, onFinish)
+                        vm.keepCaptureAndOpenDiagram(reviewedCapture) { savedFlow ->
+                            if (savedFlow != null && guideStage in listOf("capture", "finish")) {
+                                guidePreferences.edit { remove("capture_guide_stage") }
+                            }
+                            onFinish(savedFlow)
+                        }
                     },
                     modifier = Modifier.weight(1f).height(54.dp),
                     shape = RoundedCornerShape(16.dp),
@@ -1238,17 +1148,16 @@ private fun ReviewCaptureCropOverlay(
     var draggingCorner by remember { mutableStateOf<Int?>(null) }
     val latestCrop by rememberUpdatedState(crop)
     val previewInset = 16.dp
-    val lightTheme = UiColor.background.luminance() > .5f
-    val cropPage = if (lightTheme) UiColor.background else UiColor.extra.statusBar
-    val cropSurface = if (lightTheme) UiColor.surface else UiColor.extra.darkSurfaceVariant
-    val cropOutline = if (lightTheme) UiColor.outlineVariant else UiColor.extra.darkOutline
-    val cropOnSurface = if (lightTheme) UiColor.onSurface else UiColor.extra.onDarkSurface
-    val cropMuted = if (lightTheme) UiColor.onSurfaceVariant else UiColor.extra.darkOnSurfaceMuted
-    val accent = if (lightTheme) UiColor.primary else UiColor.extra.onDarkSurface
+    val cropPage = UiColor.extra.statusBar
+    val cropSurface = UiColor.extra.darkSurfaceVariant
+    val cropOutline = UiColor.extra.darkOutline
+    val cropOnSurface = UiColor.extra.onDarkSurface
+    val cropMuted = UiColor.extra.darkOnSurfaceMuted
+    val accent = UiColor.extra.onDarkSurface
     val cropDim = UiColor.scrim.copy(alpha = .58f)
     val cropGrid = cropOnSurface.copy(alpha = .60f)
-    val applyContainer = if (lightTheme) UiColor.primary else UiColor.extra.editorControl
-    val applyContent = if (lightTheme) UiColor.onPrimary else UiColor.extra.darkSurfaceVariant
+    val applyContainer = UiColor.primary
+    val applyContent = UiColor.onPrimary
     val overlayInteractionSource = remember { MutableInteractionSource() }
     val haptics = LocalHapticFeedback.current
     var edgeHapticMask by remember { mutableIntStateOf(0) }
@@ -1618,6 +1527,10 @@ private fun ReviewCaptureCropOverlay(
         }
     }
     val hasScreens = screens.isNotEmpty()
+    val showCaptureGuide = remember(flowId) {
+        context.getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
+            .getString("capture_guide_stage", "") == "capture"
+    }
     // The bottom controls must stay inside the safe area on both gesture and
     // three-button navigation devices.
     Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).diagramGrid()) {
@@ -1672,6 +1585,13 @@ private fun ReviewCaptureCropOverlay(
         }
         Column(Modifier.align(Alignment.BottomEnd).padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp), horizontalAlignment = Alignment.End) {
             EditorDrawableCircle(R.drawable.ic_flow_add, "Capture", beginCapture, large = true, enabled = !captureLaunchInProgress)
+        }
+        if (showCaptureGuide) {
+            GuideHint(
+                "2 of 4",
+                "Tap + below to start capturing. Allow the requested permissions, then drag and tap the floating bubble to take a screenshot.",
+                Modifier.align(Alignment.BottomCenter).padding(start = 24.dp, end = 24.dp, bottom = 100.dp)
+            )
         }
     }
     if (showDiagramSettings) {
@@ -1911,7 +1831,6 @@ private data class ExportProgressDetails(
     val keepIconColors: Boolean,
     val title: String,
     val description: String,
-    val destination: String,
     val usePdfIcon: Boolean = false
 )
 
@@ -1923,37 +1842,32 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
             iconRes = R.drawable.ic_flow_save,
             keepIconColors = false,
             title = "Saving JPEG image",
-            description = "Creating a high-quality image of your diagram.",
-            destination = "It will be saved to Pictures/FlowSnap."
+            description = "Creating a high-quality image of your diagram."
         )
         ExportProgressKind.PNG -> ExportProgressDetails(
             iconRes = R.drawable.ic_flow_save,
             keepIconColors = false,
             title = "Saving PNG image",
-            description = "Creating a portable PNG image of your diagram.",
-            destination = "It will be saved to Pictures/FlowSnap."
+            description = "Creating a portable PNG image of your diagram."
         )
         ExportProgressKind.PDF -> ExportProgressDetails(
             iconRes = R.drawable.ic_flow_save,
             keepIconColors = false,
             usePdfIcon = true,
             title = "Saving PDF document",
-            description = "Creating a printable PDF version of your diagram.",
-            destination = "It will be saved to Downloads/FlowSnap."
+            description = "Creating a printable PDF version of your diagram."
         )
         ExportProgressKind.PDF_AND_SVG -> ExportProgressDetails(
             iconRes = R.drawable.ic_google_drive,
             keepIconColors = true,
             title = "Preparing PDF and SVG",
-            description = "Creating files for Google Drive.",
-            destination = "The Android share screen will open automatically."
+            description = "Creating files for Google Drive."
         )
         ExportProgressKind.SVG -> ExportProgressDetails(
             iconRes = R.drawable.ic_flow_save,
             keepIconColors = false,
             title = "Saving SVG diagram",
-            description = "Creating an editable vector version of your diagram.",
-            destination = "It will be saved to Downloads/FlowSnap."
+            description = "Creating an editable vector version of your diagram."
         )
     }
     Dialog(
@@ -2004,20 +1918,7 @@ private fun ExportProgressDialog(kind: ExportProgressKind) {
                 )
                 Spacer(Modifier.height(22.dp))
                 CircularProgressIndicator(modifier = Modifier.size(48.dp), strokeWidth = 4.dp, color = primaryBlue)
-                Spacer(Modifier.height(22.dp))
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
-                    color = UiColor.surfaceVariant
-                ) {
-                    Text(
-                        details.destination,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
-                        color = UiColor.onSurfaceVariant,
-                        fontSize = 13.sp,
-                        textAlign = TextAlign.Center
-                    )
-                }
+
             }
         }
     }
@@ -2157,13 +2058,13 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     var connectorColor by remember(flow.id) { mutableLongStateOf(flow.connectorColor) }
     var preferredColumns by remember(flow.id) { mutableIntStateOf(flow.preferredColumns.coerceIn(1, 9)) }
     var appearancePage by remember(flow.id) { mutableStateOf(false) }
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         // Dim the editor beneath the modal so the settings panel is the clear focus.
         val dialogView = LocalView.current
         SideEffect {
             (dialogView.parent as? DialogWindowProvider)?.window?.setDimAmount(0.60f)
         }
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Box(Modifier.fillMaxSize().imePadding(), contentAlignment = Alignment.Center) {
         Surface(
             // Wrap content on roomy screens, but cap the height so the
             // settings remain scrollable rather than clipping on compact ones.
@@ -2222,19 +2123,18 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
                         Column(Modifier.fillMaxWidth()) {
                             EditableDiagramSetting("Title", title, { title = it }, showTitle) { showTitle = !showTitle }
                             EditableDiagramSetting("Diagram Version", version, { version = it }, showVersion) { showVersion = !showVersion }
-                            ReadOnlyDiagramSetting("Created At", java.text.SimpleDateFormat("yyyy MMM dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(flow.createdAt)), showCreatedAt) { showCreatedAt = !showCreatedAt }
+                            ReadOnlyDiagramSetting(java.text.SimpleDateFormat("yyyy MMM dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(flow.createdAt)), showCreatedAt) { showCreatedAt = !showCreatedAt }
                             EditableDiagramSetting("Created By", createdBy, { createdBy = it }, showCreatedBy) { showCreatedBy = !showCreatedBy }
-                            ReadOnlyDiagramSetting("App Version", "v1.0", showAppVersion) { showAppVersion = !showAppVersion }
                         }
                     }
                 }
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(6.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = onDismiss, modifier = Modifier.padding(end = 14.dp)) {
-                        Text("Cancel", color = UiColor.onSurfaceVariant, fontWeight = FontWeight.SemiBold)
+                        Text("Cancel", color = UiColor.onSurfaceVariant, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                     }
                     TextButton(onClick = { onSave(title, version, createdBy, showTitle, showVersion, showCreatedAt, showCreatedBy, showAppVersion, showMobileStencils, connectorColor, preferredColumns) }) {
-                        Text("Save", color = UiColor.primary, fontWeight = FontWeight.Bold)
+                        Text("Save", color = UiColor.primary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -2250,7 +2150,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Text(label, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (selected) UiColor.primary else UiColor.onSurfaceVariant)
+        Text(label, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = if (selected) UiColor.primary else UiColor.onSurfaceVariant)
     }
 }
 
@@ -2322,7 +2222,14 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable private fun EditableDiagramSetting(label: String, value: String, onValueChange: (String) -> Unit, included: Boolean, toggleIncluded: () -> Unit) {
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    var focused by remember { mutableStateOf(false) }
+    val keyboardBottom = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current)
+    androidx.compose.runtime.LaunchedEffect(focused, keyboardBottom) {
+        if (focused) bringIntoViewRequester.bringIntoView()
+    }
     Column(Modifier.fillMaxWidth()) {
         Text(label, fontSize = 13.sp, color = UiColor.onSurfaceVariant, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(3.dp))
@@ -2343,7 +2250,7 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
                     BasicTextField(
                         value = value,
                         onValueChange = onValueChange,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().bringIntoViewRequester(bringIntoViewRequester).onFocusChanged { focused = it.isFocused },
                         singleLine = true,
                         cursorBrush = SolidColor(primaryBlue),
                         textStyle = androidx.compose.ui.text.TextStyle(
@@ -2360,9 +2267,9 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     Spacer(Modifier.height(4.dp))
 }
 
-@Composable private fun ReadOnlyDiagramSetting(label: String, value: String, included: Boolean, toggleIncluded: () -> Unit) {
+@Composable private fun ReadOnlyDiagramSetting(value: String, included: Boolean, toggleIncluded: () -> Unit) {
     Column(Modifier.fillMaxWidth()) {
-        Text(label, fontSize = 13.sp, color = UiColor.onSurfaceVariant, fontWeight = FontWeight.Medium)
+        Text("Created At", fontSize = 13.sp, color = UiColor.onSurfaceVariant, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(3.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -2435,12 +2342,13 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
                 val selected = color == selectedColor
                 Box(
                     Modifier.size(27.dp)
+                        .clip(CircleShape)
                         .background(Color(color.toInt()), CircleShape)
-                        .border(if (selected) 2.5.dp else 1.dp, if (selected) UiColor.onSurface else UiColor.outline, CircleShape)
+                        .border(if (selected) 2.dp else 1.dp, if (selected) UiColor.surface else UiColor.outline, CircleShape)
                         .clickable { onColorSelected(color) },
                     contentAlignment = Alignment.Center
                 ) {
-                    if (selected) ConnectorSelectionMark(Modifier.size(20.dp))
+                    if (selected) ConnectorSelectionMark(Color(color.toInt()), Modifier.size(17.dp))
                 }
             }
         }
@@ -2468,17 +2376,19 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     )
     Box(
         Modifier.size(30.dp)
+            .clip(RoundedCornerShape(8.dp))
             .background(backgroundColor, RoundedCornerShape(8.dp))
             .border(1.dp, borderColor, RoundedCornerShape(8.dp))
             .hoverable(interactionSource)
-            // The default indication draws the chunky gray block seen in the old UI.
             .clickable(
                 interactionSource = interactionSource,
                 indication = LocalIndication.current,
                 enabled = onClick != null
             ) { onClick?.invoke() },
         contentAlignment = Alignment.Center
-    ) { if (included) Text("✓", color = UiColor.onSurface, fontSize = 20.sp, fontWeight = FontWeight.Bold) }
+    ) {
+        if (included) Icon(Icons.Default.Check, contentDescription = null, tint = UiColor.primary, modifier = Modifier.size(20.dp))
+    }
 }
 
 @Composable private fun DragTapIllustration(primaryBlue: Color) = Surface(
@@ -2530,13 +2440,17 @@ private fun ExportFormatRadio(selected: Boolean, primaryBlue: Color) {
     return this.drawBehind {
     // Fine graph-paper grid: it gives the editor structure without competing
     // with the screenshots. Every fourth line is a gentle visual guide.
-    drawRect(
-        Brush.linearGradient(
-            colors = listOf(surfaceVariant, canvasBackground),
-            start = Offset.Zero,
-            end = Offset(size.width, size.height)
+    if (canvasBackground == Color.Black) {
+        drawRect(Color.Black)
+    } else {
+        drawRect(
+            Brush.linearGradient(
+                colors = listOf(surfaceVariant, canvasBackground),
+                start = Offset.Zero,
+                end = Offset(size.width, size.height)
+            )
         )
-    )
+    }
     val spacing = 54f
     var x = 0f
     var column = 0
@@ -2645,25 +2559,32 @@ private fun writeFlowPdf(
                 val margin = 48f
                 val metadataHeight = 132f
                 val gap = 18f
-                val availableHeight = 1200f - margin * 2 - metadataHeight - gap * (rows - 1)
+                // Leave room for the curved row transition and its arrowhead.
+                val rowGap = 44f
+                val availableHeight = 1200f - margin * 2 - metadataHeight - rowGap * (rows - 1)
                 val nodeWidth = minOf(
                     (1200f - margin * 2 - gap * (columns - 1)) / columns,
                     availableHeight / (rows * 2.15f)
                 )
                 val nodeHeight = nodeWidth * 2.15f
-                // Height can constrain node size on long flows. Center the resulting
-                // widest row instead of retaining the fixed left export margin.
-                val diagramWidth = columns * nodeWidth + (columns - 1) * gap
-                val startX = ((pageInfo.pageWidth - diagramWidth) / 2f).coerceAtLeast(margin)
+                val dimensions = pageScreens.map { screen ->
+                    val aspect = sourceImageAspectRatio(context, screen.imagePath)?.toFloat() ?: (1f / 2.15f)
+                    val imageHeight = minOf(nodeWidth / aspect, nodeHeight)
+                    imageHeight * aspect to imageHeight
+                }
+                val rowTops = mutableListOf<Float>()
+                var rowTop = margin
+                for (row in 0 until rows) {
+                    rowTops.add(rowTop)
+                    rowTop += dimensions.drop(row * columns).take(columns).maxOf { it.second } + rowGap
+                }
                 val positions = List(pageScreens.size) { index ->
                     val row = index / columns
-                    val column = index % columns
-                    android.graphics.RectF(
-                        startX + column * (nodeWidth + gap),
-                        margin + row * (nodeHeight + gap),
-                        startX + column * (nodeWidth + gap) + nodeWidth,
-                        margin + row * (nodeHeight + gap) + nodeHeight
-                    )
+                    val count = minOf(columns, pageScreens.size - row * columns)
+                    val rowWidth = count * nodeWidth + (count - 1) * gap
+                    val (imageWidth, imageHeight) = dimensions[index]
+                    val left = (pageInfo.pageWidth - rowWidth) / 2f + (index % columns) * (nodeWidth + gap) + (nodeWidth - imageWidth) / 2f
+                    android.graphics.RectF(left, rowTops[row], left + imageWidth, rowTops[row] + imageHeight)
                 }
                 val indexes = pageScreens.withIndex().associate { it.value.id to it.index }
                 pageScreens.forEachIndexed { index, screen ->
@@ -2671,11 +2592,7 @@ private fun writeFlowPdf(
                     // Two source pixels per PDF pixel keep the document sharp while
                     // avoiding oversized temporary share exports.
                     decodeExportBitmap(context, screen.imagePath, (target.width() * 2).toInt(), (target.height() * 2).toInt())?.let { bitmap ->
-                        val scale = minOf(target.width() / bitmap.width, target.height() / bitmap.height)
-                        val width = bitmap.width * scale
-                        val height = bitmap.height * scale
-                        val imageRect = android.graphics.RectF(target.centerX() - width / 2, target.centerY() - height / 2, target.centerX() + width / 2, target.centerY() + height / 2)
-                        canvas.drawBitmap(bitmap, null, imageRect, paint)
+                        canvas.drawBitmap(bitmap, null, target, paint)
                         bitmap.recycle()
                     }
                 }
@@ -2990,7 +2907,7 @@ private fun writeFlowDrawio(
                 val sameRow = fromIndex / columns == toIndex / columns
                 val entryX = if (sameRow) 0f else .5f
                 val entryY = if (sameRow) .5f else 0f
-                val style = "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=$connectorColor;exitX=${edge.fromMarkerX.coerceIn(0f, 1f)};exitY=${edge.fromMarkerY.coerceIn(0f, 1f)};exitPerimeter=0;entryX=$entryX;entryY=$entryY;entryPerimeter=0;"
+                val style = "edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=$connectorColor;exitX=${edge.fromMarkerX.coerceIn(0f, 1f)};exitY=${edge.fromMarkerY.coerceIn(0f, 1f)};exitPerimeter=0;entryX=$entryX;entryY=$entryY;entryPerimeter=0;"
                 writer.write("        <mxCell id=\"edge_$edgeIndex\" value=\"\" style=\"${xmlEscape(style)}\" edge=\"1\" parent=\"1\" source=\"screen_$fromIndex\" target=\"screen_$toIndex\">\n")
                 writer.write("          <mxGeometry relative=\"1\" as=\"geometry\"/>\n        </mxCell>\n")
             }
@@ -3022,6 +2939,7 @@ private fun writeFlowSvg(
     val columns = flow.preferredColumns.coerceIn(1, screens.size)
     val margin = 40.0
     val gap = 28.0
+    val rowGap = 44.0
     val nodeWidth = 300.0
     val rows = (screens.size + columns - 1) / columns
     // Match the actual screenshot/photo dimensions. This also protects the
@@ -3038,19 +2956,22 @@ private fun writeFlowSvg(
         var currentTop = margin
         rowHeights.forEach { rowHeight ->
             add(currentTop)
-            currentTop += rowHeight + gap
+            currentTop += rowHeight + rowGap
         }
     }
     val width = margin * 2 + columns * nodeWidth + (columns - 1) * gap
-    val height = margin * 2 + rowHeights.sum() + (rows - 1) * gap
+    val height = margin * 2 + rowHeights.sum() + (rows - 1) * rowGap
     val positions = List(screens.size) { index ->
         val row = index / columns
         val column = index % columns
         val nodeHeight = nodeHeights[index]
+        val itemsInRow = minOf(columns, screens.size - row * columns)
+        val rowWidth = itemsInRow * nodeWidth + (itemsInRow - 1) * gap
+        val rowLeft = (width - rowWidth) / 2
         android.graphics.RectF(
-            (margin + column * (nodeWidth + gap)).toFloat(),
+            (rowLeft + column * (nodeWidth + gap)).toFloat(),
             rowTops[row].toFloat(),
-            (margin + column * (nodeWidth + gap) + nodeWidth).toFloat(),
+            (rowLeft + column * (nodeWidth + gap) + nodeWidth).toFloat(),
             (rowTops[row] + nodeHeight).toFloat()
         )
     }
@@ -3106,13 +3027,13 @@ private fun writeFlowSvg(
                 val startY = from.top + from.height() * edge.fromMarkerY.coerceIn(0f, 1f)
                 val endX = if (sameRow) to.left else to.centerX()
                 val endY = if (sameRow) to.centerY() else to.top
-                val (route, finalStartX, finalStartY) = if (sameRow) {
+                val (routePoints, finalStartX, finalStartY) = if (sameRow) {
                     val laneX = (startX + endX) / 2f
-                    Triple("M $startX $startY L $laneX $startY L $laneX $endY", laneX, endY)
+                    Triple(listOf(startX to startY, laneX to startY, laneX to endY), laneX, endY)
                 } else {
                     val laneX = maxOf(from.right, to.right) + 10f
-                    val laneY = endY - 20f
-                    Triple("M $startX $startY L $laneX $startY L $laneX $laneY L $endX $laneY", endX, laneY)
+                    val laneY = endY - 28f
+                    Triple(listOf(startX to startY, laneX to startY, laneX to laneY, endX to laneY), endX, laneY)
                 }
                 val directionX = endX - finalStartX
                 val directionY = endY - finalStartY
@@ -3123,9 +3044,10 @@ private fun writeFlowSvg(
                 val baseY = endY - unitY * 13f
                 val perpendicularX = -unitY * 7f
                 val perpendicularY = unitX * 7f
-                val points = "$endX,$endY ${baseX + perpendicularX},${baseY + perpendicularY} ${baseX - perpendicularX},${baseY - perpendicularY}"
-                writer.write("  <path d=\"$route L $baseX $baseY\" fill=\"none\" stroke=\"$connectorColor\" stroke-width=\"3.5\" stroke-linecap=\"butt\" stroke-linejoin=\"round\"/>\n")
-                writer.write("  <circle cx=\"$startX\" cy=\"$startY\" r=\"5\" fill=\"$connectorColor\"/>\n  <polygon points=\"$points\" fill=\"$connectorColor\"/>\n")
+                val route = roundedSvgPath(routePoints + (endX to endY))
+                writer.write("  <path d=\"$route\" fill=\"none\" stroke=\"$connectorColor\" stroke-width=\"3.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n")
+                writer.write("  <path d=\"M ${baseX + perpendicularX} ${baseY + perpendicularY} L $endX $endY L ${baseX - perpendicularX} ${baseY - perpendicularY}\" fill=\"none\" stroke=\"$connectorColor\" stroke-width=\"3.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n")
+                writer.write("  <circle cx=\"$startX\" cy=\"$startY\" r=\"5\" fill=\"$connectorColor\"/>\n")
             }
             writer.write("</svg>\n")
         }
@@ -3519,6 +3441,25 @@ private fun ZipOutputStream.writeZipText(name: String, content: String) {
     closeEntry()
 }
 
+/** Rounds each SVG polyline corner without exceeding either adjacent segment. */
+private fun roundedSvgPath(points: List<Pair<Float, Float>>): String {
+    val radius = 10f
+    val result = StringBuilder("M ${points.first().first} ${points.first().second}")
+    for (i in 1 until points.lastIndex) {
+        val (x0, y0) = points[i - 1]
+        val (x, y) = points[i]
+        val (x1, y1) = points[i + 1]
+        val before = kotlin.math.hypot(x - x0, y - y0)
+        val after = kotlin.math.hypot(x1 - x, y1 - y)
+        if (before < .001f || after < .001f) continue
+        val r = minOf(radius, before / 2f, after / 2f)
+        result.append(" L ${x - (x - x0) * r / before} ${y - (y - y0) * r / before}")
+        result.append(" Q $x $y ${x + (x1 - x) * r / after} ${y + (y1 - y) * r / after}")
+    }
+    result.append(" L ${points.last().first} ${points.last().second}")
+    return result.toString()
+}
+
 /** Mirrors the editor's visible orthogonal marker-to-next-screen connector. */
 private fun drawPdfTransition(
     canvas: android.graphics.Canvas,
@@ -3548,7 +3489,7 @@ private fun drawPdfTransition(
         // Finish vertically above the next-row target so the arrow points down
         // into its top edge, matching the SVG export.
         val laneX = maxOf(from.right, to.right) + 10f
-        val laneY = endY - 20f
+        val laneY = endY - 28f
         Triple(
             endX,
             laneY,
@@ -3572,23 +3513,22 @@ private fun drawPdfTransition(
     val baseY = endY - unitY * arrowLength
     val perpendicularX = -unitY * arrowHalfWidth
     val perpendicularY = unitX * arrowHalfWidth
-    // The connector ends at the base of the triangle. The triangle tip alone
-    // reaches the screenshot edge, so there is no rounded stroke stub.
-    path.lineTo(baseX, baseY)
+    path.lineTo(endX, endY)
     val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
         color = connectorColor; style = android.graphics.Paint.Style.STROKE; strokeWidth = 3.5f
-        strokeJoin = android.graphics.Paint.Join.ROUND; strokeCap = android.graphics.Paint.Cap.BUTT
+        strokeJoin = android.graphics.Paint.Join.ROUND; strokeCap = android.graphics.Paint.Cap.ROUND
+        pathEffect = android.graphics.CornerPathEffect(10f)
     }
     canvas.drawPath(path, paint)
-    paint.style = android.graphics.Paint.Style.FILL
-    canvas.drawCircle(startX, startY, 5f, paint)
+    paint.pathEffect = null
     val arrow = android.graphics.Path().apply {
-        moveTo(endX, endY)
-        lineTo(baseX + perpendicularX, baseY + perpendicularY)
+        moveTo(baseX + perpendicularX, baseY + perpendicularY)
+        lineTo(endX, endY)
         lineTo(baseX - perpendicularX, baseY - perpendicularY)
-        close()
     }
     canvas.drawPath(arrow, paint)
+    paint.style = android.graphics.Paint.Style.FILL
+    canvas.drawCircle(startX, startY, 5f, paint)
 }
 
 private fun drawPdfMetadataTable(
@@ -3639,12 +3579,12 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
 @Composable private fun EditorDrawableCircle(iconRes: Int, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, large: Boolean = false, enabled: Boolean = true, iconTint: Color? = null) {
     val size = if (large) 60.dp else 44.dp
     val defaultIconTint = if (enabled) UiColor.primary else UiColor.extra.disabled
-    val controlColor = if (UiColor.background.luminance() > .5f) Color.White else UiColor.primaryContainer
+    val controlColor = if (UiColor.background.luminance() > .5f) UiColor.surface else UiColor.primaryContainer
     Surface(
         modifier = modifier.size(size),
         shape = CircleShape,
-        color = if (enabled) controlColor else UiColor.surfaceVariant,
-        shadowElevation = if (enabled) 5.dp else 0.dp
+        color = controlColor,
+        shadowElevation = 5.dp
     ) {
         Box(Modifier.fillMaxSize().clip(CircleShape).clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) {
             Icon(
@@ -3823,15 +3763,14 @@ private fun fittedScreenshotRectInPadding(
     val context = androidx.compose.ui.platform.LocalContext.current
     val hostActivity = LocalActivity.current
     val workspace = UiColor.extra
-    val lightViewerTheme = UiColor.background.luminance() > .5f
-    val viewerBarColor = if (lightViewerTheme) UiColor.background else workspace.darkSurfaceVariant
-    val lightboxStatusBar = if (lightViewerTheme) UiColor.surface else workspace.statusBar
-    val viewerSurface = if (lightViewerTheme) UiColor.surface else workspace.darkSurface
-    val viewerSurfaceVariant = if (lightViewerTheme) UiColor.surfaceVariant else workspace.darkSurfaceVariant
-    val viewerOutline = if (lightViewerTheme) UiColor.outlineVariant else workspace.darkOutline
-    val viewerOnSurface = if (lightViewerTheme) UiColor.onSurface else workspace.onDarkSurface
-    val viewerMuted = if (lightViewerTheme) UiColor.onSurfaceVariant else workspace.darkOnSurfaceMuted
-    // The Lightbox follows the selected app theme, including its system bars.
+    val viewerBarColor = workspace.darkSurfaceVariant
+    val lightboxStatusBar = workspace.statusBar
+    val viewerSurface = workspace.darkSurface
+    val viewerSurfaceVariant = Color(0xFF29344B)
+    val viewerOutline = workspace.darkOutline
+    val viewerOnSurface = workspace.onDarkSurface
+    val viewerMuted = workspace.darkOnSurfaceMuted
+    // The screenshot viewer stays dark independently of the rest of the app.
     androidx.compose.runtime.DisposableEffect(hostActivity, viewerBarColor) {
         val hostWindow = hostActivity?.window ?: return@DisposableEffect onDispose { }
         val controller = WindowCompat.getInsetsController(hostWindow, hostWindow.decorView)
@@ -3841,8 +3780,8 @@ private fun fittedScreenshotRectInPadding(
         val previousNavigationBarColor = hostWindow.navigationBarColor
         hostWindow.statusBarColor = lightboxStatusBar.toArgb()
         hostWindow.navigationBarColor = viewerBarColor.toArgb()
-        controller.isAppearanceLightStatusBars = lightViewerTheme
-        controller.isAppearanceLightNavigationBars = lightViewerTheme
+        controller.isAppearanceLightStatusBars = false
+        controller.isAppearanceLightNavigationBars = false
         onDispose {
             hostWindow.statusBarColor = previousStatusBarColor
             hostWindow.navigationBarColor = previousNavigationBarColor
@@ -3910,8 +3849,8 @@ private fun fittedScreenshotRectInPadding(
                 it.statusBarColor = lightboxStatusBar.toArgb()
                 it.navigationBarColor = viewerBarColor.toArgb()
                 val dialogController = WindowCompat.getInsetsController(it, dialogView)
-                dialogController.isAppearanceLightStatusBars = lightViewerTheme
-                dialogController.isAppearanceLightNavigationBars = lightViewerTheme
+                dialogController.isAppearanceLightStatusBars = false
+                dialogController.isAppearanceLightNavigationBars = false
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 window?.setBackgroundBlurRadius(24)
@@ -4185,10 +4124,10 @@ private fun fittedScreenshotRectInPadding(
                     Surface(
                         modifier = Modifier.size(42.dp),
                         shape = CircleShape,
-                        color = UiColor.extra.destructiveContainer
+                        color = Color(0xFF51252B)
                     ) {
                         Box(contentAlignment = Alignment.Center) {
-                            Text("!", color = UiColor.error, fontSize = 23.sp, fontWeight = FontWeight.Bold)
+                            Text("!", color = Color(0xFFFFA6AA), fontSize = 23.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                     Spacer(Modifier.width(12.dp))
@@ -4266,6 +4205,47 @@ private fun fittedScreenshotRectInPadding(
     }
 }
 
+/** Computes fitted screenshot bounds once for drawing and hit testing. */
+private fun diagramImageRects(
+    screens: List<ScreenEntity>,
+    bitmaps: Map<String, androidx.compose.ui.graphics.ImageBitmap>,
+    width: Float,
+    height: Float,
+    margin: Float,
+    gap: Float,
+    rowGap: Float,
+    columns: Int
+): List<androidx.compose.ui.geometry.Rect> {
+    val rows = (screens.size + columns - 1) / columns
+    val nodeWidth = minOf(
+        (width - margin * 2 - gap * (columns - 1)) / columns,
+        (height - margin * 2 - rowGap * (rows - 1)) / (rows * 2.15f)
+    ).coerceAtLeast(1f)
+    val nodeHeight = nodeWidth * 2.15f
+    val dimensions = screens.map { screen ->
+        val image = bitmaps[screen.id]
+        if (image == null) nodeWidth to nodeHeight else {
+            val aspect = image.width.toFloat() / image.height.toFloat()
+            val fittedHeight = minOf(nodeWidth / aspect, nodeHeight)
+            fittedHeight * aspect to fittedHeight
+        }
+    }
+    val rowTops = mutableListOf<Float>()
+    var top = margin
+    for (row in 0 until rows) {
+        rowTops.add(top)
+        top += dimensions.drop(row * columns).take(columns).maxOf { it.second } + rowGap
+    }
+    return screens.indices.map { index ->
+        val row = index / columns
+        val count = minOf(columns, screens.size - row * columns)
+        val rowWidth = count * nodeWidth + (count - 1) * gap
+        val (imageWidth, imageHeight) = dimensions[index]
+        val left = (width - rowWidth) / 2f + (index % columns) * (nodeWidth + gap) + (nodeWidth - imageWidth) / 2f
+        androidx.compose.ui.geometry.Rect(left, rowTops[row], left + imageWidth, rowTops[row] + imageHeight)
+    }
+}
+
 /** Draws screenshot nodes and the persisted marker-to-next-screen transitions. */
 @Composable private fun FlowDiagramCanvas(
     screens: List<ScreenEntity>,
@@ -4277,153 +4257,30 @@ private fun fittedScreenshotRectInPadding(
     columnsOverride: Int? = null,
     onScreenClick: (ScreenEntity) -> Unit = {}
 ) {
-    val canvasSurface = UiColor.surface
+    val pointerRingColor = Color.White
     Canvas(
     modifier.pointerInput(screens, bitmaps, columnsOverride) {
         detectTapGestures { tap ->
             if (screens.isEmpty()) return@detectTapGestures
-            val margin = 10.dp.toPx()
-            val gap = 8.dp.toPx()
-            val rowGap = 12.dp.toPx()
-            val aspectRatio = 2.15f
             val columns = (columnsOverride ?: 5).coerceIn(1, screens.size)
-            val rows = (screens.size + columns - 1) / columns
-            val widthBound = (size.width - margin * 2 - gap * (columns - 1)) / columns
-            val heightBound = (size.height - margin * 2 - rowGap * (rows - 1)) / (rows * aspectRatio)
-            val nodeWidth = minOf(widthBound, heightBound).coerceAtLeast(1f)
-            val nodeHeight = nodeWidth * aspectRatio
-            val imageRects = screens.mapIndexed { index, screen ->
-                val row = index / columns
-                val column = index % columns
-                val itemsInThisRow = minOf(columns, screens.size - row * columns)
-                val rowWidth = itemsInThisRow * nodeWidth + (itemsInThisRow - 1) * gap
-                val slot = Offset(
-                    (size.width - rowWidth) / 2f + column * (nodeWidth + gap),
-                    margin + row * (nodeHeight + rowGap)
-                )
-                val image = bitmaps[screen.id]
-                if (image == null) {
-                    androidx.compose.ui.geometry.Rect(slot.x, slot.y, slot.x + nodeWidth, slot.y + nodeHeight)
-                } else {
-                    val imageAspect = image.width.toFloat() / image.height.toFloat()
-                    var width = nodeWidth
-                    var height = width / imageAspect
-                    if (height > nodeHeight) {
-                        height = nodeHeight
-                        width = height * imageAspect
-                    }
-                    androidx.compose.ui.geometry.Rect(
-                        slot.x + (nodeWidth - width) / 2f,
-                        slot.y + (nodeHeight - height) / 2f,
-                        slot.x + (nodeWidth + width) / 2f,
-                        slot.y + (nodeHeight + height) / 2f
-                    )
-                }
-            }
+            val imageRects = diagramImageRects(
+                screens, bitmaps, size.width.toFloat(), size.height.toFloat(),
+                10.dp.toPx(), 8.dp.toPx(), maxOf(12.dp.toPx(), 22f), columns
+            )
             imageRects.indexOfFirst { it.contains(tap) }
                 .takeIf { it >= 0 }
                 ?.let { onScreenClick(screens[it]) }
         }
     }
 ) {
-    // All values are in pixels here. Convert dp explicitly to keep the canvas
-    // geometry in sync with the Compose layout above on every screen density.
     val margin = 10.dp.toPx()
-    val gap = 8.dp.toPx()
-    val rowGap = 12.dp.toPx()
-    val aspectRatio = 2.15f
-    // Five columns match the vertically scrolling reference layout. Rows are
-    // added below, rather than shrinking a whole diagram page or creating a
-    // second page.
     val columns = (columnsOverride ?: 5).coerceIn(1, screens.size)
-    val rows = (screens.size + columns - 1) / columns
-    val widthBound = (size.width - margin * 2 - gap * (columns - 1)) / columns
-    val heightBound = (size.height - margin * 2 - rowGap * (rows - 1)) / (rows * aspectRatio)
-    val nodeWidth = minOf(widthBound, heightBound).coerceAtLeast(1f)
-    val nodeHeight = nodeWidth * aspectRatio
-    // The diagram is a vertically scrolling document. Centering a narrow
-    // five-column grid inside the fixed canvas left a large blank band above
-    // the first row; keep it anchored to the card's normal top padding.
-    val topInset = margin
-    val positions = List(screens.size) { index ->
-        val row = index / columns
-        val column = index % columns
-        val itemsInThisRow = minOf(columns, screens.size - row * columns)
-        val rowWidth = itemsInThisRow * nodeWidth + (itemsInThisRow - 1) * gap
-        val rowInset = (size.width - rowWidth) / 2f
-        Offset(rowInset + column * (nodeWidth + gap), topInset + row * (nodeHeight + rowGap))
-    }
+    val imageRects = diagramImageRects(
+        screens, bitmaps, size.width, size.height,
+        margin, 8.dp.toPx(), maxOf(12.dp.toPx(), 22f), columns
+    )
     val nodeById = screens.withIndex().associate { it.value.id to it.index }
-    // FlowSnap's diagram connectors: the marker is placed by the user on a
-    // screenshot and the green orthogonal path leads to the next screen.
-    val stroke = connectorColor
     val visibleTransitions = if (showMobileStencils) transitions else emptyList()
-    // Each screenshot gets its own fitted rectangle. This preserves its source
-    // aspect ratio even when a capture came from a device with a different size.
-    val imageRects = screens.mapIndexed { index, screen ->
-        val slot = positions[index]
-        val image = bitmaps[screen.id]
-        if (image == null) {
-            androidx.compose.ui.geometry.Rect(slot.x, slot.y, slot.x + nodeWidth, slot.y + nodeHeight)
-        } else {
-            val aspect = image.width.toFloat() / image.height.toFloat()
-            var width = nodeWidth
-            var height = width / aspect
-            if (height > nodeHeight) {
-                height = nodeHeight
-                width = height * aspect
-            }
-            androidx.compose.ui.geometry.Rect(
-                slot.x + (nodeWidth - width) / 2f,
-                slot.y + (nodeHeight - height) / 2f,
-                slot.x + (nodeWidth + width) / 2f,
-                slot.y + (nodeHeight + height) / 2f
-            )
-        }
-    }
-
-    // Edges are drawn first so screenshots stay on top. The start point uses
-    // the exact normalized marker saved when the user tapped CAPTURE.
-    visibleTransitions.forEach { transition ->
-        val fromIndex = nodeById[transition.fromScreenId] ?: return@forEach
-        val toIndex = nodeById[transition.toScreenId] ?: return@forEach
-        val source = imageRects[fromIndex]
-        val destination = imageRects[toIndex]
-        val start = Offset(
-            source.left + source.width * transition.fromMarkerX,
-            source.top + source.height * transition.fromMarkerY
-        )
-        val sameRow = fromIndex / columns == toIndex / columns
-        val end = if (sameRow) {
-            Offset(destination.left, destination.top + destination.height * .5f)
-        } else {
-            Offset(destination.left + destination.width * .5f, destination.top)
-        }
-        val path = androidx.compose.ui.graphics.Path().apply {
-            moveTo(start.x, start.y)
-            if (sameRow) {
-                val laneX = (start.x + end.x) / 2f
-                lineTo(laneX, start.y)
-                lineTo(laneX, end.y)
-            } else {
-                val laneX = size.width - margin
-                val laneY = end.y - 10f
-                lineTo(laneX, start.y)
-                lineTo(laneX, laneY)
-                lineTo(end.x, laneY)
-            }
-            lineTo(end.x, end.y)
-        }
-        drawPath(path, stroke, style = Stroke(2.5f))
-        drawCircle(stroke, 5f, start)
-        if (sameRow) {
-            drawLine(stroke, end, end + Offset(-8f, -5f), 2.5f)
-            drawLine(stroke, end, end + Offset(-8f, 5f), 2.5f)
-        } else {
-            drawLine(stroke, end, end + Offset(-5f, -8f), 2.5f)
-            drawLine(stroke, end, end + Offset(5f, -8f), 2.5f)
-        }
-    }
 
     screens.forEachIndexed { index, screen ->
         val imageRect = imageRects[index]
@@ -4463,21 +4320,21 @@ private fun fittedScreenshotRectInPadding(
                 lineTo(laneX, end.y)
             } else {
                 val laneX = size.width - margin
-                val laneY = end.y - 10f
+                val laneY = end.y - 20f
                 lineTo(laneX, start.y)
                 lineTo(laneX, laneY)
                 lineTo(end.x, laneY)
             }
             lineTo(end.x, end.y)
         }
-        drawPath(path, stroke, style = Stroke(2.5f))
-        drawCircle(stroke, 5f, start)
+        drawPath(path, connectorColor, style = Stroke(2.5f, cap = androidx.compose.ui.graphics.StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round, pathEffect = androidx.compose.ui.graphics.PathEffect.cornerPathEffect(8f)))
+        drawCircle(connectorColor, 5f, start)
         if (sameRow) {
-            drawLine(stroke, end, end + Offset(-8f, -5f), 2.5f)
-            drawLine(stroke, end, end + Offset(-8f, 5f), 2.5f)
+            drawLine(connectorColor, end, end + Offset(-8f, -5f), 2.5f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+            drawLine(connectorColor, end, end + Offset(-8f, 5f), 2.5f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
         } else {
-            drawLine(stroke, end, end + Offset(-5f, -8f), 2.5f)
-            drawLine(stroke, end, end + Offset(5f, -8f), 2.5f)
+            drawLine(connectorColor, end, end + Offset(-5f, -8f), 2.5f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+            drawLine(connectorColor, end, end + Offset(5f, -8f), 2.5f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
         }
     }
 
@@ -4491,8 +4348,8 @@ private fun fittedScreenshotRectInPadding(
             source.left + source.width * transition.fromMarkerX,
             source.top + source.height * transition.fromMarkerY
         )
-        drawCircle(canvasSurface, 7f, point)
-        drawCircle(stroke, 4f, point)
+        drawCircle(pointerRingColor, 7f, point)
+        drawCircle(connectorColor, 4f, point)
     }
     }
 }

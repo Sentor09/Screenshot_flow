@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.FlowSnap" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FFFFFF</item>
+        <item name="android:statusBarColor">#FFFFFF</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowSplashScreenBackground">#FFFFFF</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launch_splash</item>
+    </style>
+</resources>
