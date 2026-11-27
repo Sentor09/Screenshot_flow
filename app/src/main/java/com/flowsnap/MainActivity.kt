@@ -71,11 +71,8 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.PhoneAndroid
@@ -105,13 +102,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.SideEffect
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.slideInHorizontally
@@ -136,7 +133,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.draw.shadow
@@ -168,16 +164,7 @@ import androidx.core.graphics.createBitmap
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
-import com.flowsnap.canvas.CanvasBounds
-import com.flowsnap.canvas.CanvasEdge
-import com.flowsnap.canvas.CanvasNode
-import com.flowsnap.canvas.CanvasPoint
-import com.flowsnap.canvas.CanvasSize
-import com.flowsnap.canvas.CanvasViewport
 import com.flowsnap.canvas.InitialCanvasLayout
-import com.flowsnap.canvas.deriveCanvasEndpoints
-import com.flowsnap.canvas.nearestPointOnCanvasBounds
-import com.flowsnap.canvas.hitTestCanvasNodes
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
@@ -210,197 +197,6 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
     }
 }
 
-/**
- * Renders the logical flow canvas using the persisted viewport. Interaction is
- * deliberately supplied in Step 5 so this renderer stays a pure presentation layer.
- */
-@Composable private fun FlowCanvasRenderer(
-    state: FlowCanvasState,
-    bitmaps: Map<String, androidx.compose.ui.graphics.ImageBitmap>,
-    modifier: Modifier = Modifier,
-    viewport: CanvasViewport = state.viewport
-) {
-    val colors = MaterialTheme.colorScheme
-    val extra = LocalFlowSnapExtraColors.current
-    Canvas(modifier) {
-    val flow = state.flow ?: return@Canvas
-    val nodeBounds = state.screens.associate { screen ->
-        val nodeSize = canvasNodeSize(bitmaps[screen.id])
-        screen.id to CanvasBounds(screen.canvasX, screen.canvasY, screen.canvasX + nodeSize.width, screen.canvasY + nodeSize.height)
-    }
-    fun screenPoint(point: CanvasPoint): Offset = viewport.toScreen(point).let { Offset(it.x, it.y) }
-    fun screenBounds(bounds: CanvasBounds): androidx.compose.ui.geometry.Rect {
-        val topLeft = screenPoint(CanvasPoint(bounds.left, bounds.top))
-        val bottomRight = screenPoint(CanvasPoint(bounds.right, bounds.bottom))
-        return androidx.compose.ui.geometry.Rect(topLeft.x, topLeft.y, bottomRight.x, bottomRight.y)
-    }
-    val edges = state.transitions.mapNotNull { transition ->
-        val source = nodeBounds[transition.fromScreenId] ?: return@mapNotNull null
-        val destination = nodeBounds[transition.toScreenId] ?: return@mapNotNull null
-        val start = CanvasPoint(source.left + source.width * transition.fromMarkerX, source.top + source.height * transition.fromMarkerY)
-        Triple(start, nearestPointOnCanvasBounds(start, destination), transition)
-    }
-    // Connectors are flow semantics, so their green adapts to the active theme.
-    val connector = extra.marker
-    val endpoints = deriveCanvasEndpoints(state.screens.map { it.id }.toSet(), state.transitions.map { CanvasEdge(it.fromScreenId, it.toScreenId) })
-    state.screens.forEach { screen ->
-        val bounds = nodeBounds.getValue(screen.id)
-        val rect = screenBounds(bounds)
-        drawRect(colors.surface, topLeft = rect.topLeft, size = rect.size)
-        bitmaps[screen.id]?.let { image ->
-            drawImage(image, dstOffset = androidx.compose.ui.unit.IntOffset(rect.left.toInt(), rect.top.toInt()), dstSize = androidx.compose.ui.unit.IntSize(rect.width.toInt().coerceAtLeast(1), rect.height.toInt().coerceAtLeast(1)), filterQuality = FilterQuality.High)
-        } ?: run {
-            drawRect(extra.screenshotPlaceholder, topLeft = rect.topLeft, size = rect.size)
-            drawCircle(extra.screenshotPlaceholderIcon, radius = 18f, center = rect.center)
-            drawCircle(colors.onPrimary, radius = 5f, center = rect.center)
-        }
-        drawRect(extra.canvasNodeBorder, topLeft = rect.topLeft, size = rect.size, style = Stroke(2f))
-        val label = when {
-            screen.id in endpoints.startNodeIds && screen.id in endpoints.endNodeIds -> "START / END"
-            screen.id in endpoints.startNodeIds -> "START"
-            screen.id in endpoints.endNodeIds -> "END"
-            else -> null
-        }
-        label?.let {
-            val badgeColor = colors.tertiary
-            val badgeContentColor = colors.onTertiary
-            val badgeWidth = when (it) {
-                "START / END" -> 104f
-                "START" -> 64f
-                else -> 54f
-            }
-            val badgeTopLeft = Offset(rect.left + 8f, rect.top + 8f)
-            drawRoundRect(badgeColor, topLeft = badgeTopLeft, size = androidx.compose.ui.geometry.Size(badgeWidth, 26f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(13f, 13f))
-            drawCircle(badgeContentColor.copy(alpha = .9f), radius = 4f, center = Offset(badgeTopLeft.x + 12f, badgeTopLeft.y + 13f))
-            drawContext.canvas.nativeCanvas.drawText(it, badgeTopLeft.x + 21f, badgeTopLeft.y + 17f, android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = badgeContentColor.toArgb(); textSize = 11f; typeface = android.graphics.Typeface.DEFAULT_BOLD })
-        }
-    }
-    // Connectors deliberately render over screenshots so their route and
-    // arrowheads remain visible from the capture marker to the target edge.
-    if (flow.showMobileStencils) edges.forEach { (start, end, _) ->
-        val startPoint = screenPoint(start)
-        val endPoint = screenPoint(end)
-        val destinationIsSideEdge = kotlin.math.abs(endPoint.x - startPoint.x) >= kotlin.math.abs(endPoint.y - startPoint.y)
-        val bend = if (destinationIsSideEdge) {
-            Offset(startPoint.x, endPoint.y)
-        } else {
-            Offset(endPoint.x, startPoint.y)
-        }
-        val strokeWidth = (2.5f * viewport.zoom).coerceIn(2f, 4f)
-        drawLine(connector, startPoint, bend, strokeWidth)
-        drawLine(connector, bend, endPoint, strokeWidth)
-
-        val finalStart = if ((endPoint - bend).getDistance() > .5f) bend else startPoint
-        val direction = endPoint - finalStart
-        val length = direction.getDistance().coerceAtLeast(1f)
-        val unit = Offset(direction.x / length, direction.y / length)
-        val perpendicular = Offset(-unit.y, unit.x)
-        val arrowLength = (10f * viewport.zoom).coerceIn(7f, 16f)
-        val arrowWidth = arrowLength * .58f
-        val base = endPoint - Offset(unit.x * arrowLength, unit.y * arrowLength)
-        drawLine(connector, endPoint, base + Offset(perpendicular.x * arrowWidth, perpendicular.y * arrowWidth), strokeWidth)
-        drawLine(connector, endPoint, base - Offset(perpendicular.x * arrowWidth, perpendicular.y * arrowWidth), strokeWidth)
-    }
-    if (flow.showMobileStencils) edges.forEach { (start, _, _) ->
-        val marker = screenPoint(start)
-        drawCircle(colors.onPrimary, 8f, marker)
-        drawCircle(connector, 5f, marker)
-    }
-    }
-}
-
-/** Interactive shell for the renderer. A selected node drags; every other one-finger gesture pans. */
-@Composable private fun InteractiveFlowCanvas(
-    state: FlowCanvasState,
-    bitmaps: Map<String, androidx.compose.ui.graphics.ImageBitmap>,
-    vm: FlowViewModel,
-    onOpenScreen: (ScreenEntity) -> Unit,
-    command: CanvasCommand?,
-    onCommandHandled: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    // Canvas mode is a fresh overview on every open. Node locations persist,
-    // but a prior zoom or pan must not change the initial fit-to-flow view.
-    var viewport by remember(state.flow?.id) { mutableStateOf(CanvasViewport()) }
-    var selectedId by remember(state.flow?.id) { mutableStateOf<String?>(null) }
-    var positions by remember(state.screens) { mutableStateOf(state.screens.associate { it.id to CanvasPoint(it.canvasX, it.canvasY) }) }
-    var canvasSize by remember { mutableStateOf(CanvasSize(0f, 0f)) }
-    val displayScreens = state.screens.map { screen -> positions[screen.id]?.let { screen.copy(canvasX = it.x, canvasY = it.y) } ?: screen }
-    val displayState = state.copy(screens = displayScreens)
-    val nodeModels = displayScreens.map { screen -> CanvasNode(screen.id, CanvasPoint(screen.canvasX, screen.canvasY), canvasNodeSize(bitmaps[screen.id])) }
-    val currentViewport by rememberUpdatedState(viewport)
-    val currentNodes by rememberUpdatedState(nodeModels)
-    val currentScreens by rememberUpdatedState(displayScreens)
-    LaunchedEffect(state.flow?.id, canvasSize.width, canvasSize.height) {
-        if (canvasSize.width > 0f && canvasSize.height > 0f) {
-            val fittedViewport = vm.fitCanvasViewport(displayScreens, bitmaps, canvasSize, padding = 32f)
-            viewport = fittedViewport
-        }
-    }
-    // One-time compatibility reflow: canvases created before the column
-    // preference was honored used the fixed five-column default. Only migrate
-    // an untouched default grid, never a user-arranged canvas.
-    LaunchedEffect(state.flow?.id, state.flow?.preferredColumns, state.screens) {
-        val flow = state.flow ?: return@LaunchedEffect
-        val requestedColumns = flow.preferredColumns
-        val usesLegacyGrid = requestedColumns != InitialCanvasLayout.COLUMNS &&
-            state.screens.isNotEmpty() &&
-            state.screens.all { screen ->
-                CanvasPoint(screen.canvasX, screen.canvasY) == InitialCanvasLayout.positionFor(screen.position)
-            } && state.screens.any { screen ->
-                InitialCanvasLayout.positionFor(screen.position, requestedColumns) != InitialCanvasLayout.positionFor(screen.position)
-            }
-        if (usesLegacyGrid) vm.autoLayoutCanvas(flow, state.screens)
-    }
-    LaunchedEffect(command) {
-        when (command) {
-            CanvasCommand.ZoomOut -> viewport = viewport.copy(zoom = (viewport.zoom / 1.25f).coerceAtLeast(.15f))
-            CanvasCommand.ZoomIn -> viewport = viewport.copy(zoom = (viewport.zoom * 1.25f).coerceAtMost(3f))
-            CanvasCommand.Fit -> viewport = vm.fitCanvasViewport(displayScreens, bitmaps, canvasSize)
-            CanvasCommand.Arrange -> state.flow?.let { vm.autoLayoutCanvas(it, displayScreens) }
-            null -> return@LaunchedEffect
-        }
-        onCommandHandled()
-    }
-    Box(modifier) {
-        FlowCanvasRenderer(
-            state = displayState,
-            bitmaps = bitmaps,
-            viewport = viewport,
-            modifier = Modifier.fillMaxSize().onSizeChanged { canvasSize = CanvasSize(it.width.toFloat(), it.height.toFloat()) }
-                .pointerInput(Unit) {
-                    detectTapGestures { tap ->
-                        val hit = hitTestCanvasNodes(CanvasPoint(tap.x, tap.y), currentViewport, currentNodes)?.id
-                        if (hit != null && hit == selectedId) currentScreens.firstOrNull { it.id == hit }?.let(onOpenScreen)
-                        else selectedId = hit
-                    }
-                }
-                .pointerInput(Unit) {
-                    detectTransformGestures { centroid, pan, zoom, _ ->
-                        val activeViewport = currentViewport
-                        val selected = selectedId?.let { id -> currentNodes.firstOrNull { it.id == id } }
-                        val selectedAtGesture = selected?.bounds?.let { activeViewport.toScreen(it.center) }
-                        val movingSelectedNode = zoom == 1f && selectedAtGesture != null &&
-                            kotlin.math.abs(centroid.x - selectedAtGesture.x) <= 180f * activeViewport.zoom &&
-                            kotlin.math.abs(centroid.y - selectedAtGesture.y) <= 340f * activeViewport.zoom
-                        val selectedNodeToMove = selected?.takeIf {
-                            movingSelectedNode
-                        }
-                        if (selectedNodeToMove != null) {
-                            val moved = CanvasPoint(selectedNodeToMove.position.x + pan.x / activeViewport.zoom, selectedNodeToMove.position.y + pan.y / activeViewport.zoom)
-                            positions = positions + (selectedNodeToMove.id to moved)
-                            displayScreens.firstOrNull { it.id == selectedNodeToMove.id }?.let { vm.persistCanvasNodePosition(it, moved) }
-                        } else {
-                            val zoomed = if (zoom == 1f) activeViewport else activeViewport.zoomedAround(CanvasPoint(centroid.x, centroid.y), (activeViewport.zoom * zoom).coerceIn(.15f, 3f))
-                            val updatedViewport = zoomed.pannedBy(CanvasPoint(pan.x, pan.y))
-                            viewport = updatedViewport
-                        }
-                    }
-                }
-        )
-    }
-}
-
 @Composable private fun SmallCanvasDrawableControl(@androidx.annotation.DrawableRes iconRes: Int, label: String, onClick: () -> Unit) {
     Surface(
         shape = CircleShape,
@@ -418,25 +214,7 @@ data class CaptureCrop(val left: Float, val top: Float, val right: Float, val bo
     }
 }
 
-data class FlowCanvasState(
-    val flow: FlowEntity?,
-    val screens: List<ScreenEntity>,
-    val transitions: List<TransitionEntity>,
-    val viewport: CanvasViewport
-)
-private enum class CanvasCommand { ZoomOut, ZoomIn, Fit, Arrange }
 private enum class ExportProgressKind { JPEG, PNG, PDF, PDF_AND_SVG, SVG }
-
-private fun canvasNodeSize(image: androidx.compose.ui.graphics.ImageBitmap?): CanvasSize {
-    // Preserve the source aspect ratio, but keep very wide crops inside their
-    // grid column. Reducing both dimensions avoids overlap without stretching
-    // the image or adding a padded phone-shaped frame.
-    val preferredHeight = 711f
-    val maxWidth = 340f
-    val aspect = image?.let { it.width.toFloat() / it.height.toFloat() } ?: (9f / 20f)
-    val height = minOf(preferredHeight, maxWidth / aspect)
-    return CanvasSize(height * aspect, height)
-}
 
 private val Urbanist = FontFamily(
     Font(R.font.urbanist_regular, FontWeight.Normal),
@@ -556,8 +334,6 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
     // Keep the gallery query alive for the app lifetime. This prevents a
     // transient empty Home grid when returning from a completed capture.
     val flows = dao.observeAll().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
-    private val nodePersistenceJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
-    private val viewportPersistenceJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     fun createFlow(open: (FlowEntity) -> Unit) = viewModelScope.launch {
         val preferences = getApplication<android.app.Application>()
             .getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
@@ -687,39 +463,6 @@ class FlowViewModel(application: android.app.Application) : AndroidViewModel(app
     fun screens(flowId: String) = dao.observeScreens(flowId)
     fun transitions(flowId: String) = dao.observeTransitions(flowId)
     fun flow(flowId: String) = dao.observeFlow(flowId)
-    /** Persist the final drag location after movement has been quiet for a short interval. */
-    fun persistCanvasNodePosition(screen: ScreenEntity, position: CanvasPoint) {
-        nodePersistenceJobs.remove(screen.id)?.cancel()
-        nodePersistenceJobs[screen.id] = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            delay(250.milliseconds)
-            dao.updateScreenCanvasPosition(screen.id, position.x, position.y)
-            dao.touchFlow(screen.flowId, System.currentTimeMillis())
-        }
-    }
-
-    /** Persist viewport convenience state without writing for every pan or pinch frame. */
-    fun persistCanvasViewport(flowId: String, viewport: CanvasViewport) {
-        viewportPersistenceJobs.remove(flowId)?.cancel()
-        viewportPersistenceJobs[flowId] = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            delay(250.milliseconds)
-            dao.updateCanvasViewport(flowId, viewport.zoom, viewport.pan.x, viewport.pan.y)
-        }
-    }
-
-    fun autoLayoutCanvas(flow: FlowEntity, screens: List<ScreenEntity>) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-        // Keep canvas and preview consistent: arrange captures in the same
-        // preferred-column grid instead of extending a linear flow indefinitely.
-        val positions = screens.associate { screen ->
-            screen.id to InitialCanvasLayout.positionFor(screen.position, flow.preferredColumns)
-        }
-        dao.updateCanvasLayout(flow.id, positions.mapValues { it.value.x to it.value.y })
-    }
-
-    fun fitCanvasViewport(screens: List<ScreenEntity>, bitmaps: Map<String, androidx.compose.ui.graphics.ImageBitmap>, viewportSize: CanvasSize, padding: Float = 48f): CanvasViewport {
-        val bounds = CanvasBounds.enclosing(screens.map { CanvasNode(it.id, CanvasPoint(it.canvasX, it.canvasY), canvasNodeSize(bitmaps[it.id])).bounds })
-        return bounds?.let { CanvasViewport.fit(it, viewportSize, padding, minZoom = .15f, maxZoom = 3f) } ?: CanvasViewport()
-    }
-
     fun cleanupOrphanedCaptures(pendingReviewPath: String?) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
         ScreenshotStorage.deleteUnreferencedFiles(getApplication(), dao.referencedImagePaths().toSet() + listOfNotNull(pendingReviewPath))
     }
@@ -792,6 +535,7 @@ private const val THEME_DARK = "dark"
     }
 }
 
+@Suppress("DEPRECATION") // Fallback colors for devices with opaque system-bar regions.
 @Composable private fun FlowSnapApp(
     review: CaptureReview?,
     dismissReview: () -> Unit,
@@ -1180,7 +924,7 @@ private const val THEME_DARK = "dark"
                 shadowElevation = 2.dp
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Add, "Create diagram", tint = UiColor.onPrimary, modifier = Modifier.size(42.dp))
+                    Icon(painterResource(R.drawable.ic_flow_add), "Create diagram", tint = UiColor.onPrimary, modifier = Modifier.size(42.dp))
                 }
             }
         }
@@ -1503,7 +1247,6 @@ private fun ReviewCaptureCropOverlay(
     val accent = if (lightTheme) UiColor.primary else UiColor.extra.onDarkSurface
     val cropDim = UiColor.scrim.copy(alpha = .58f)
     val cropGrid = cropOnSurface.copy(alpha = .60f)
-    val cropHandleCenter = cropPage
     val applyContainer = if (lightTheme) UiColor.primary else UiColor.extra.editorControl
     val applyContent = if (lightTheme) UiColor.onPrimary else UiColor.extra.darkSurfaceVariant
     val overlayInteractionSource = remember { MutableInteractionSource() }
@@ -1632,7 +1375,7 @@ private fun ReviewCaptureCropOverlay(
                                 point.y.coerceIn(handleInset, size.height - handleInset)
                             )
                             drawCircle(accent, 6.dp.toPx(), handle)
-                            drawCircle(cropHandleCenter, 2.5.dp.toPx(), handle)
+                            drawCircle(cropPage, 2.5.dp.toPx(), handle)
                         }
                     }
                 }
@@ -1881,7 +1624,7 @@ private fun ReviewCaptureCropOverlay(
         // The diagram is one tall document: screenshots flow downward in five
         // columns and this area scrolls independently of the fixed controls.
         // The padding keeps document content clear of those controls.
-        EditorCircle(Icons.Default.Home, "Home", goBack, modifier = Modifier.align(Alignment.TopStart).padding(24.dp))
+        EditorDrawableCircle(R.drawable.ic_flow_home, "Home", goBack, modifier = Modifier.align(Alignment.TopStart).padding(24.dp))
         Row(
             modifier = Modifier.align(Alignment.TopEnd).padding(24.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp)
@@ -1928,7 +1671,7 @@ private fun ReviewCaptureCropOverlay(
             EditorDrawableCircle(R.drawable.ic_flow_delete, "Delete diagram", onClick = { showDeleteConfirmation = true })
         }
         Column(Modifier.align(Alignment.BottomEnd).padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp), horizontalAlignment = Alignment.End) {
-            EditorCircle(Icons.Default.Add, "Capture", beginCapture, large = true, enabled = !captureLaunchInProgress)
+            EditorDrawableCircle(R.drawable.ic_flow_add, "Capture", beginCapture, large = true, enabled = !captureLaunchInProgress)
         }
     }
     if (showDiagramSettings) {
@@ -3892,25 +3635,15 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
     return value.substring(0, end) + suffix
 }
 
-@Composable private fun EditorCircle(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, large: Boolean = false, enabled: Boolean = true) {
-    val size = if (large) 60.dp else 44.dp
-    val iconTint = if (enabled) UiColor.primary else UiColor.extra.disabled
-    Surface(
-        modifier = modifier.size(size),
-        shape = CircleShape,
-        color = if (enabled) UiColor.primaryContainer else UiColor.surfaceVariant,
-        shadowElevation = if (enabled) 5.dp else 0.dp
-    ) { Box(Modifier.fillMaxSize().clip(CircleShape).clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) { Icon(icon, label, tint = iconTint, modifier = Modifier.size(if (large) 32.dp else 23.dp)) } }
-}
-
 /** Renders the supplied Android Studio vector assets in the existing editor control style. */
 @Composable private fun EditorDrawableCircle(iconRes: Int, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, large: Boolean = false, enabled: Boolean = true, iconTint: Color? = null) {
     val size = if (large) 60.dp else 44.dp
     val defaultIconTint = if (enabled) UiColor.primary else UiColor.extra.disabled
+    val controlColor = if (UiColor.background.luminance() > .5f) Color.White else UiColor.primaryContainer
     Surface(
         modifier = modifier.size(size),
         shape = CircleShape,
-        color = if (enabled) UiColor.primaryContainer else UiColor.surfaceVariant,
+        color = if (enabled) controlColor else UiColor.surfaceVariant,
         shadowElevation = if (enabled) 5.dp else 0.dp
     ) {
         Box(Modifier.fillMaxSize().clip(CircleShape).clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) {
@@ -3936,7 +3669,7 @@ private fun ellipsizePdfText(value: String, paint: android.graphics.Paint, maxWi
 ) {
     val bitmaps = rememberScreenBitmaps(screens, maxDimension = 1600)
     var selectedScreen by remember { mutableStateOf<ScreenEntity?>(null) }
-    var previewZoom by remember(flow.id) { mutableStateOf(1f) }
+    var previewZoom by remember(flow.id) { mutableFloatStateOf(1f) }
     var previewPan by remember(flow.id) { mutableStateOf(Offset.Zero) }
     val columns = flow.preferredColumns.coerceIn(1, screens.size.coerceAtLeast(1))
     val rows = (screens.size + columns - 1) / columns
@@ -4129,7 +3862,6 @@ private fun fittedScreenshotRectInPadding(
     val pointerShadow = viewerBarColor.copy(alpha = .72f)
     val pointerRing = viewerOnSurface.copy(alpha = .9f)
     val pointerAccent = workspace.marker
-    val pointerCenter = viewerOnSurface
     val backdropAlpha by animateFloatAsState(
         targetValue = if (visible) 1f else 0f,
         animationSpec = tween(180),
@@ -4316,7 +4048,7 @@ private fun fittedScreenshotRectInPadding(
                             drawCircle(pointerShadow, 28f, marker)
                             drawCircle(pointerRing, 21f, marker)
                             drawCircle(pointerAccent, 12f, marker)
-                            drawCircle(pointerCenter, 4f, marker)
+                            drawCircle(viewerOnSurface, 4f, marker)
                         }
                     }
                 }
